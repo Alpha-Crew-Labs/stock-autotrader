@@ -17,3 +17,4 @@ __pycache__/
 dashboard/
 dashboard_replay/
 logs/
+KILL_SWITCH

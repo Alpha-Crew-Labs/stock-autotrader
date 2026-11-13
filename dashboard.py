@@ -22,6 +22,8 @@ def _fmt(x, nd=0):
 def health(state, snap, today=None):
     """(등급, 항목, 내용) 목록. 등급: good / warning / critical"""
     out = []
+    if snap.get("kill"):
+        out.append(("critical", "긴급 정지(KILL_SWITCH)", f"{snap['kill']} — 주문 중지 중. 확인 후 파일 삭제로 해제"))
     today = today or pd.Timestamp(dt.date.today())
     asof = pd.Timestamp(snap["asof"])
     lag = len(pd.bdate_range(asof, today)) - 1
@@ -117,7 +119,7 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl{{list-style:none;pad
 #tip{{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px #0002}}
 </style></head><body><main>
 <h1>주식 자동매매 — 모의 장부</h1>
-<p class="sub">형님 스토캐스틱 v2 · 일봉 · 기준일 {snap['asof']} · 마지막 실행 {snap.get('last_run','')}</p>
+<p class="sub">형님 스토캐스틱 v4 · 일봉 · 모드 {snap.get('mode', 'paper')} · 기준일 {snap['asof']} · 마지막 실행 {snap.get('last_run','')}</p>
 <div class="tiles">
 <div class="tile"><div class="k">평가자산</div><div class="v">{_fmt(equity)}원</div></div>
 <div class="tile"><div class="k">누적 수익률</div><div class="v">{ret:+.2f}%</div></div>

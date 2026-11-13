@@ -1,0 +1,18 @@
+{
+  "_설명": "운영 설정 (비밀값 없음, 커밋 OK). 키는 config.local.json 에만. 자세한 설명은 OPERATIONS.md",
+  "mode": "paper",
+  "capital": 10000000,
+  "max_positions": 10,
+  "units": 3,
+  "watchlist_top": 75,
+  "limits": {
+    "max_order_krw": 1000000,
+    "max_daily_buy_krw": 3000000,
+    "daily_loss_stop_pct": 3.0,
+    "max_drawdown_stop_pct": 15.0
+  },
+  "live": {
+    "enabled": false,
+    "account_note": "실전 전: 회사 신고 계좌인지, 사내 규정 확인"
+  }
+}

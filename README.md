@@ -1,5 +1,7 @@
 # 📈 Stock Autotrader — 스토캐스틱 일봉 자동매매
 
+[![tests](https://github.com/Alpha-Crew-Labs/stock-autotrader/actions/workflows/ci.yml/badge.svg)](https://github.com/Alpha-Crew-Labs/stock-autotrader/actions/workflows/ci.yml)
+
 국내주식을 **스토캐스틱 하나로** 사고파는 자동매매 시스템.
 "최대한 잃지 말자"는 한 실전 투자자(형님)의 매매법을 규칙으로 옮기고, 10년 데이터로 검증한 뒤 **모의 장부**로 매일 돌린다.
 
@@ -33,7 +35,25 @@ flowchart LR
     D -.나중에.-> F[키움 REST API<br/>모의투자 → 실전]
 ```
 
-매일 장 마감 후 `run_daily.cmd` 한 번 → 스크리닝 → 신호 → 모의 체결 → [대시보드](https://alpha-crew-labs.github.io/stock-autotrader/) 갱신.
+| 시각 (평일) | 실행 | 하는 일 |
+|---|---|---|
+| 08:40 | `run_orders.cmd` | 어제 만든 대기주문을 증권사로 전송 (모의투자/실전 모드) |
+| 16:10 | `run_daily.cmd` | 스크리닝 → 잔고·체결 반영 → 신호 → 내일 주문 → [대시보드](https://alpha-crew-labs.github.io/stock-autotrader/) |
+
+## 실전 투입 — 3단계 + 안전장치
+
+`config.json`의 `mode` 하나로 단계를 올린다. 자세히는 **[OPERATIONS.md](OPERATIONS.md)**.
+
+| 단계 | mode | 내용 |
+|---|---|---|
+| ① 모의 장부 | `paper` | 장부에만 기록 (지금) |
+| ② 키움 모의투자 | `mock` | 키움 모의 서버로 진짜 주문, 잔고로 장부 맞춤 |
+| ③ 실전 | `live` | `live.enabled=true` + `--live` **이중 잠금** |
+
+🛡️ 1건·하루 주문 한도 · 하루 -3% / 고점 대비 -15% 손실 시 `KILL_SWITCH` 자동 생성(주문 중지) · 같은 날 중복 주문 방지 · 매도는 증권사 잔고 기준 · 테스트(CI)로 아침 주문 → 체결 → 장부 맞추기 흐름 검증
+
+## 같이 고치기
+형님과 유찬이 각자 **Claude Code**로 고친다. Claude는 [`CLAUDE.md`](CLAUDE.md)(규칙·금지사항)를 자동으로 읽는다. 작업 순서는 [`CONTRIBUTING.md`](CONTRIBUTING.md) — 브랜치 → 백테스트 근거 → 테스트 통과 → PR.
 
 ## 검증 결과
 
@@ -85,7 +105,11 @@ OpenDART 2021~2026 상장사 CB 공시 2,002건을 추적 — 공시 후 120일 
 
 | 파일 | 역할 |
 |---|---|
-| `run_daily.py` · `run_daily.cmd` | 매일 실행 (신호 → 모의 장부 → 리포트·대시보드) |
+| `run_daily.py` · `run_daily.cmd` | 오후 실행 (잔고·체결 반영 → 신호 → 대기주문 → 리포트·대시보드) |
+| `run_orders.py` · `run_orders.cmd` | 아침 주문 전송 (한도·KILL_SWITCH·중복 방지) |
+| `config.json` · `settings.py` · `broker.py` | 운영 설정·안전장치·증권사 계층 |
+| `tests/` · `.github/workflows/ci.yml` | 테스트 (미래 데이터 차단, 실전 흐름, 안전장치) |
+| [`CLAUDE.md`](CLAUDE.md) · [`OPERATIONS.md`](OPERATIONS.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) | Claude 규칙 · 실전 운영 · 협업 |
 | `screener.py` | 관심종목 스크리닝 (CB 발행사 제외) |
 | `dashboard.py` | 대시보드 HTML |
 | `replay.py` | 과거 날짜 리플레이 검증 (미래 데이터 차단) |
@@ -98,9 +122,11 @@ OpenDART 2021~2026 상장사 CB 공시 2,002건을 추적 — 공시 후 120일 
 ## 실행
 
 ```bash
-pip install pandas numpy finance-datareader yfinance matplotlib requests tabulate
-# config.local.json  (커밋 금지): {"dart_api_key": "..."}
-python screener.py && python run_daily.py
+pip install -r requirements.txt
+python -m pytest -q
+# config.local.json  (커밋 금지): {"dart_api_key": "...", "kiwoom_mock_appkey": "...", ...}  → OPERATIONS.md
+python screener.py && python run_daily.py      # 오후
+python run_orders.py --dry-run                 # 아침 주문 계획 미리보기
 ```
 
 > ⚠️ 개인 연구 프로젝트입니다. 투자 권유가 아니며, 백테스트는 생존 편향(현재 시총 상위 종목으로 선정)이 있습니다.

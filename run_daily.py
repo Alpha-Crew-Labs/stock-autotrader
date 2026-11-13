@@ -1,4 +1,7 @@
-r"""매일 장 마감 후 실행: 형님 스토캐스틱 v2 신호 -> 모의 장부(페이퍼 트레이딩) -> (선택) 키움 모의주문
+r"""매일 장 마감 후 실행(16:10~): 형님 스토캐스틱 v4 신호 -> 장부 갱신 -> 내일 아침 주문(대기) 생성
+
+모드(config.json mode): paper = 모의 장부를 시가로 체결 처리 / mock·live = 증권사 잔고로 장부를 맞춤(reconcile)
+아침 주문 전송은 run_orders.py. 손실 한도 초과 시 KILL_SWITCH 자동 생성(mock·live).
 
 흐름
  1) 지난 실행에서 만든 '대기 주문'을 오늘 시가로 체결 처리 (모의 장부)
@@ -8,11 +11,11 @@ r"""매일 장 마감 후 실행: 형님 스토캐스틱 v2 신호 -> 모의 장
     - 추가 매수: ADD 신호, 최대 3회, 직전 매수 후 5거래일 경과
     - 전량 매도: SELL 신호
  3) 내일 시가에 낼 대기 주문 생성 -> state/paper.json 저장
- 4) --kiwoom 이면 키움 모의투자로 같은 주문 전송 (kiwoom_client.py, 기본 모의 서버)
+ 4) (mock·live) 다음 날 아침 run_orders.py 가 대기주문을 증권사로 전송
  5) 리포트: reports/daily_YYYYMMDD.md
 
 관심종목: watchlist.csv(Code,Name; 직접 관리)가 있으면 그것, 없으면 최신 watchlist/candidates_*.csv 상위 N
-실행: python run_daily.py [--top 30] [--kiwoom] [--capital 10000000]
+실행: python run_daily.py [--top N] [--capital 원]   (기본값은 config.json)
 """
 from pathlib import Path
 import argparse, json, math
@@ -21,12 +24,15 @@ import pandas as pd
 import FinanceDataReader as fdr
 from backtest_hyung2 import prep, UNITS
 from backtest_hyung3 import weekly_ok   # v3: 주봉 스토캐스틱 상승 중일 때만 신규 매수
+import settings
+
+CFG = settings.load()
 
 HERE = Path(__file__).parent
 STATE = HERE / "state" / "paper.json"
 REPORTS = HERE / "reports"
 DASH = HERE / "dashboard"
-MAX_POS = 10
+MAX_POS = CFG["max_positions"]
 BUY_COST, SELL_COST = 0.00015, 0.00015 + 0.0020   # 실매매 비용(슬리피지 제외)
 
 
@@ -97,21 +103,60 @@ def fill_pending(s, px_cache, log):
     s["pending"] = keep
 
 
+def reconcile(s, broker, asof, px_cache, log):
+    """mock·live: 증권사 잔고를 진실로 장부를 맞춘다. 전략 메타(매수횟수·진입일)는 장부 것을 유지."""
+    h = broker.holdings()
+    day = str(asof.date())
+    sub = {(o["code"], o["side"]): o for o in s["pending"] if o.get("status") == "submitted"}
+    for code, b in h.items():
+        pos = s["positions"].get(code)
+        cost = b["qty"] * b["avg_price"] * (1 + BUY_COST)
+        if pos is None:
+            o = sub.get((code, "buy"))
+            s["positions"][code] = {"name": b["name"], "qty": b["qty"], "cost": cost, "units": 1,
+                                    "unit_amt": (o or {}).get("amount", cost), "opened": day, "last_buy": day}
+            log.append(f"- 매수 체결 확인 {b['name']} {b['qty']}주" + ("" if o else " (장부에 없던 보유 — 수동 매매?)"))
+        elif b["qty"] > pos["qty"]:
+            pos.update(qty=b["qty"], cost=cost, units=pos["units"] + 1, last_buy=day)
+            log.append(f"- 추가매수 체결 확인 {b['name']} → {b['qty']}주")
+        elif b["qty"] != pos["qty"]:
+            pos.update(qty=b["qty"], cost=cost)
+            log.append(f"- 수량 변경 {b['name']} → {b['qty']}주 (부분 체결/수동 매매)")
+    for code in [c for c in s["positions"] if c not in h]:
+        pos = s["positions"].pop(code)
+        df = px_cache.get(code)
+        if df is None:
+            df = px_cache[code] = prices(code)
+        op = float(df["Open"].iloc[-1])
+        r = pos["qty"] * op * (1 - SELL_COST) / pos["cost"] - 1
+        s["history"].append({"code": code, "name": pos["name"], "opened": pos["opened"], "closed": day,
+                             "units": pos["units"], "ret": round(r, 4), "est": True})
+        log.append(f"- 매도 체결 확인 {pos['name']} (시가 기준 추정 수익률 {100*r:+.2f}%)")
+    for (code, side), o in sub.items():
+        filled = (side == "buy" and code in h) or (side == "sell" and code not in h)
+        if not filled:
+            log.append(f"- 미체결 {side} {o['name']} — 오늘 신호로 다시 판단")
+    s["pending"] = []
+    s["cash"] = broker.orderable_cash()
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--top", type=int, default=30)
-    ap.add_argument("--capital", type=float, default=10_000_000)
-    ap.add_argument("--kiwoom", action="store_true", help="키움 모의투자로 주문 전송")
+    ap.add_argument("--top", type=int, default=CFG["watchlist_top"])
+    ap.add_argument("--capital", type=float, default=CFG["capital"])
     a = ap.parse_args()
 
     s = load_state(a.capital)
     wl = load_watchlist(a.top)
     px, log = {}, []
-    fill_pending(s, px, log)
-
     k200 = prices("069500")
     mkt_on = bool(k200["Close"].iloc[-1] > k200["Close"].rolling(200).mean().iloc[-1])
     asof = k200.index[-1]
+    if CFG["mode"] == "paper":
+        fill_pending(s, px, log)
+    else:
+        from broker import get_broker
+        reconcile(s, get_broker(CFG, live_flag=True), asof, px, log)
 
     codes = dict(wl)
     codes.update({c: p["name"] for c, p in s["positions"].items()})
@@ -186,19 +231,13 @@ def main():
     s["equity_log"].append({"date": str(asof.date()), "equity": round(equity), "cash": round(s["cash"]),
                             "n_pos": len(s["positions"]), "mkt_on": mkt_on})
 
-    if a.kiwoom and new_orders:
-        try:
-            from kiwoom_client import KiwoomClient
-            kc = KiwoomClient(mock=True)
-            for o in new_orders:
-                if o["side"] == "buy":
-                    qty = math.floor(o["amount"] / int(next(r["종가"] for r in rows if r["코드"] == o["code"])))
-                    res = kc.buy(o["code"], qty) if qty > 0 else "수량 0"
-                else:
-                    res = kc.sell(o["code"], s["positions"][o["code"]]["qty"])
-                log.append(f"- 키움 모의주문 {o['side']} {o['name']}: {res}")
-        except Exception as e:
-            log.append(f"- 키움 모의주문 생략: {e}")
+    # 손실 한도 (mock·live 는 KILL_SWITCH 자동 생성 -> 아침 주문 중지)
+    breach = settings.check_loss_limits(CFG, s["equity_log"])
+    if breach:
+        if CFG["mode"] != "paper":
+            settings.trip_kill(breach)
+        log.append(f"- ⚠ 손실 한도 초과: {breach}" + (" → KILL_SWITCH 생성, 내일 주문 중지" if CFG["mode"] != "paper" else " (paper 모드: 경고만)"))
+    kill = settings.kill_reason()
     save_state(s)
 
     REPORTS.mkdir(exist_ok=True)
@@ -206,6 +245,7 @@ def main():
     hot = tbl[tbl["신호"].fillna("") != ""] if "신호" in tbl else tbl
     hist = pd.DataFrame(s["history"])
     md = [f"# 일일 신호 {asof:%Y-%m-%d}",
+          f"- 모드: **{CFG['mode']}**" + (f" / ⛔ KILL_SWITCH: {kill}" if kill else ""),
           f"- 시장 필터(KODEX200 > 200일선): **{'ON' if mkt_on else 'OFF'}**",
           f"- 평가자산 {equity:,.0f}원 (초기 {s['capital0']:,.0f}, {100*(equity/s['capital0']-1):+.2f}%) / 현금 {s['cash']:,.0f}원 / 보유 {len(s['positions'])}종목",
           "", "## 오늘 체결(모의)", *(log or ["- 없음"]),
@@ -215,7 +255,7 @@ def main():
           "", f"## 청산 누적: {len(hist)}건" + (f", 승률 {100*(hist['ret']>0).mean():.0f}%, 평균 {100*hist['ret'].mean():+.2f}%" if len(hist) else "")]
     out = REPORTS / f"daily_{asof:%Y%m%d}.md"
     out.write_text("\n".join(md), encoding="utf-8")
-    snap = {"asof": str(asof.date()), "mkt_on": mkt_on, "rows": rows, "new_orders": new_orders,
+    snap = {"asof": str(asof.date()), "mkt_on": mkt_on, "mode": CFG["mode"], "kill": kill, "rows": rows, "new_orders": new_orders,
             "log": log, "last_run": s["last_run"]}
     STATE.with_name(STATE.stem + "_snapshot.json").write_text(
         json.dumps(snap, ensure_ascii=False, default=str), encoding="utf-8")
