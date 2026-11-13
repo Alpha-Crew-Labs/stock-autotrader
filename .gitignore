@@ -1,0 +1,19 @@
+# 비밀값 — 절대 커밋 금지
+config.local.json
+*.local.json
+.env*
+state/
+# 데이터·산출물(재생성 가능)
+data/
+data_5m/
+data_cb/
+data_screen/
+results/
+reports/
+reports_replay/
+watchlist/
+__pycache__/
+*.pyc
+dashboard/
+dashboard_replay/
+logs/
