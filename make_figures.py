@@ -202,6 +202,31 @@ def fig_cb():
     plt.close(fig)
 
 
+# 6) 파라미터 안정성 히트맵 (results/v3_params.csv, backtest_v3_extra.py 결과)
+def fig_params():
+    f = RES / "v3_params.csv"
+    if not f.exists():
+        return
+    p2 = pd.read_csv(f)
+    m = p2.pivot(index="기간", columns="평활", values="PF")
+    n = p2.pivot(index="기간", columns="평활", values="거래수")
+    fig, ax = plt.subplots(figsize=(6.4, 4.4))
+    ax.grid(False)
+    vmax = max(abs(m.values - 1).max(), 0.05)
+    ax.imshow(m.values - 1, cmap="RdBu", vmin=-vmax, vmax=vmax)
+    for (r, c), v in np.ndenumerate(m.values):
+        strong = abs(v - 1) > 0.55 * vmax
+        ax.text(c, r, f"{v:.2f}\n({int(n.values[r, c])}건)", ha="center", va="center", fontsize=10.5,
+                color="#ffffff" if strong else INK,
+                fontweight="bold" if (m.index[r], m.columns[c]) == (14, 5) else "normal")
+    ax.set_xticks(range(len(m.columns)), [f"%K·%D {c}" for c in m.columns])
+    ax.set_yticks(range(len(m.index)), [f"기간 {i}" for i in m.index])
+    title(ax, "설정을 바꿔도 버티나 — 수익팩터", "파랑 = 1보다 큼(이익), 빨강 = 손실 · 굵은 글씨 = 형님 설정 (14,5,5)")
+    fig.tight_layout()
+    fig.savefig(IMG / "v3_params.png", dpi=150)
+    plt.close(fig)
+
+
 def main():
     state = json.loads((HERE / "state" / "replay.json").read_text(encoding="utf-8"))
     fig_strategies()
@@ -209,6 +234,7 @@ def main():
     fig_example(state)
     fig_replay(state)
     fig_cb()
+    fig_params()
     # GitHub Pages 데모 = 2026 리플레이 대시보드
     src = HERE / "dashboard_replay" / "index.html"
     if src.exists():

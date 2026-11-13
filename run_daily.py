@@ -139,9 +139,18 @@ def main():
             sig = "데이터 지연"
         elif pos:
             since = (f.index > pd.Timestamp(pos["last_buy"])).sum()
-            if last["SELL"]:
-                sig = "매도"
-                new_orders.append({"side": "sell", "code": code, "name": name, "why": "SELL 신호"})
+            # v4 청산(형님 해석, backtest_exits.py E2): 이익 중이면 %K가 80 위로 갔다가 꺾일 때까지 보유,
+            #                                         손실 중이면 데드크로스(예상) 신호에 바로 매도(원금 보호)
+            in_profit = pos["qty"] * float(last["Close"]) > pos["cost"]
+            held = f[f.index >= pd.Timestamp(pos["opened"])]
+            hit80 = bool((held["K"] > 80).any())
+            k_down = len(f) > 1 and last["K"] < f["K"].iloc[-2]
+            if in_profit and hit80 and k_down:
+                sig = "매도(80 도달 후 꺾임)"
+                new_orders.append({"side": "sell", "code": code, "name": name, "why": "이익 + %K 80 후 하락"})
+            elif not in_profit and last["SELL"]:
+                sig = "매도(손실 중 데드크로스)"
+                new_orders.append({"side": "sell", "code": code, "name": name, "why": "손실 + SELL 신호"})
             elif last["ADD"] and pos["units"] < UNITS and since >= 5:
                 sig = "추가매수"
                 new_orders.append({"side": "buy", "code": code, "name": name, "amount": pos["unit_amt"],
