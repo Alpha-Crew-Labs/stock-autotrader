@@ -4,6 +4,7 @@ r"""매일 장 마감 후 실행: 형님 스토캐스틱 v2 신호 -> 모의 장
  1) 지난 실행에서 만든 '대기 주문'을 오늘 시가로 체결 처리 (모의 장부)
  2) 관심종목 + 보유종목의 일봉으로 신호 계산 (backtest_hyung2.prep 그대로 사용 = 백테스트와 같은 규칙)
     - 신규 매수: BUY 신호 + 시장 필터(KODEX200 > 200일선) + 종목 필터(200일선 위, 120일 수익률 > 0)
+                 + 주봉 필터(직전 주봉 스토캐스틱 %K > %D) — v3, backtest_hyung3.py 근거
     - 추가 매수: ADD 신호, 최대 3회, 직전 매수 후 5거래일 경과
     - 전량 매도: SELL 신호
  3) 내일 시가에 낼 대기 주문 생성 -> state/paper.json 저장
@@ -19,6 +20,7 @@ import datetime as dt
 import pandas as pd
 import FinanceDataReader as fdr
 from backtest_hyung2 import prep, UNITS
+from backtest_hyung3 import weekly_ok   # v3: 주봉 스토캐스틱 상승 중일 때만 신규 매수
 
 HERE = Path(__file__).parent
 STATE = HERE / "state" / "paper.json"
@@ -123,6 +125,7 @@ def main():
             if len(df) < 250:
                 raise ValueError(f"일봉 {len(df)}개(250개 미만)")
             f = prep(df)
+            f["WOK"] = weekly_ok(f)
         except Exception as e:
             rows.append({"코드": code, "종목": name, "메모": f"데이터 오류 {e}"})
             continue
@@ -148,6 +151,8 @@ def main():
                 sig = "매수신호(시장필터 OFF)"
             elif not last["TREND"]:
                 sig = "매수신호(종목필터 탈락)"
+            elif not last["WOK"]:
+                sig = "매수신호(주봉 하락 중)"
             else:
                 sig = "신규매수"
         rows.append({"코드": code, "종목": name, "종가": int(last["Close"]), "%K": round(last["K"], 1),

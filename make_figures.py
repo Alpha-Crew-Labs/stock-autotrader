@@ -44,17 +44,19 @@ def fig_strategies():
     s5 = pd.read_csv(RES / "summary_5m.csv")
     h1 = pd.read_csv(RES / "summary_hyung.csv").set_index("구분")
     h2 = pd.read_csv(RES / "summary_hyung2.csv").set_index("구분")
+    h3 = pd.read_csv(RES / "summary_hyung3.csv").set_index("구분")
     mdd1 = lambda st: float(s1[(s1["전략"] == st) & (s1["손절"] == "없음")]["MDD%"].iloc[0])
     rows = [("\"승률 99%\" RSI+MACD+스토캐스틱 (5분봉)", float(s5.loc[s5["설정"].str.contains("10봉"), "PF(비용후)"].iloc[0]), None),
             ("RSI + MACD + 스토캐스틱", pf_from_trades("D_스토+RSI+MACD"), mdd1("D_스토+RSI+MACD")),
             ("스토캐스틱 20 매수 / 80 매도", pf_from_trades("A0_스토캐스틱_단순"), mdd1("A0_스토캐스틱_단순")),
             ("형님 기법 v1 (교차 기준)", float(h1.loc["일봉·주식50 (2016~) / 완화형", "PF"]), float(h1.loc["일봉·주식50 (2016~) / 완화형", "MDD%"])),
             ("형님 기법 v2 (필터 없음)", float(h2.loc["필터 없음", "PF"]), float(h2.loc["필터 없음", "MDD%"])),
-            ("형님 기법 v2 + 시장·종목 필터 (채택)", float(h2.loc["시장+종목 필터", "PF"]), float(h2.loc["시장+종목 필터", "MDD%"]))]
+            ("형님 기법 v2 + 시장·종목 필터", float(h2.loc["시장+종목 필터", "PF"]), float(h2.loc["시장+종목 필터", "MDD%"])),
+            ("형님 기법 v3 + 주봉 스토캐스틱 (채택)", float(h3.loc["W 주봉 필터", "PF"]), float(h3.loc["W 주봉 필터", "MDD%"]))]
     names = [r[0] for r in rows]
     y = np.arange(len(rows))
     col = [BLUE if "채택" in n else "#c9c8c2" for n in names]
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 4.8), sharey=True, gridspec_kw={"width_ratios": [1, 1]})
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(12, 5.3), sharey=True, gridspec_kw={"width_ratios": [1, 1]})
     a1.barh(y, [r[1] for r in rows], color=col, height=0.6, zorder=3)
     a1.axvline(1.0, color=INK, lw=1.2, zorder=4)
     for yi, r in zip(y, rows):
@@ -105,10 +107,10 @@ def fig_risk():
 # 3) 실제 종목에서 신호가 어떻게 나오나
 def fig_example(state):
     h = pd.DataFrame(state["history"])
-    # 대표 종목: 거래 4건 이상 중 평균 수익률이 전체 평균에 가장 가까운 종목 (골라 보여주기 방지)
-    g = h.groupby("code")["ret"].agg(["count", "mean"])
-    g = g[g["count"] >= 4]
-    code = (g["mean"] - h["ret"].mean()).abs().idxmin()
+    # 예시 종목: 거래가 가장 많고, 같으면 보유 기간이 긴 종목 (신호 흐름이 잘 보이도록, 수익률로 고르지 않음)
+    h["days"] = (pd.to_datetime(h["closed"]) - pd.to_datetime(h["opened"])).dt.days
+    g = h.groupby("code").agg(n=("ret", "size"), d=("days", "sum")).sort_values(["n", "d"], ascending=False)
+    code = g.index[0]
     name = h.loc[h["code"] == code, "name"].iloc[0]
     tr = h[h["code"] == code]
     df = stoch(fdr.DataReader(code, "2025-03-01")[["Open", "High", "Low", "Close", "Volume"]])
@@ -129,7 +131,7 @@ def fig_example(state):
     a1.legend(loc="upper left", frameon=False, ncol=3, fontsize=10)
     a1.set_ylabel("주가(원)")
     a1.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    title(a1, f"신호 예시 — {name} ({code}), 2026년", "스토캐스틱이 20 아래에서 고개를 들면 사고, 꺾이면 판다 (모의 리플레이 실제 거래)")
+    title(a1, f"신호 예시 — {name} ({code}), 2026년", f"스토캐스틱이 20 아래에서 고개를 들면 사고, 꺾이면 판다 · 리플레이 전체 {len(h)}건 중 승률 {100*(h['ret']>0).mean():.0f}%, 거래당 평균 {100*h['ret'].mean():+.1f}%")
     a2.axhspan(0, 20, color=BLUE, alpha=0.08, lw=0)
     a2.axhline(20, color=MUTED, lw=1, ls="--")
     a2.axhline(80, color=MUTED, lw=1, ls="--")
