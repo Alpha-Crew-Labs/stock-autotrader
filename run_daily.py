@@ -1,16 +1,16 @@
-r"""매일 장 마감 후 실행(16:10~): v6 멀티마켓(KR·US) 신호 -> 장부 갱신 -> 내일 아침 주문(대기) 생성
+r"""매일 장 마감 후 실행(16:10~): v7 멀티마켓(KR·US) 신호 -> 장부 갱신 -> 내일 아침 주문(대기) 생성
 
 모드(config.json mode): paper = 모의 장부 시가 체결 / mock·live = 증권사 잔고 맞춤(reconcile, 읽기 전용)
 아침 주문 전송은 run_orders.py. 손실 한도 초과 시 KILL_SWITCH 자동 생성(mock·live).
 
-흐름 (v6 기본값: pullback_v6 + E3_atr + clenow + inverse_vol)
+흐름 (v7 기본값: pullback_v7 + E3_atr + clenow + inverse_vol + vol_targeting)
  1) 지난 실행에서 만든 '대기 주문'을 오늘 시가로 체결 처리 (모의 장부)
  2) 관심종목 + 보유종목의 일봉으로 신호 계산 (strategy.py 단일 진실 공급원)
-    - 신규 매수(v6): 정배열(Close>SMA200 & SMA50>SMA200) + 단기 눌림목(RSI2<10 | (IBS<0.20 & Close<SMA5))
-      * config.json 에서 entry_mode='stoch_v5' 로 기존 스토캐스틱+주봉 규칙 전환 가능
-    - 후보 순위(v6): Clenow90(90일 회귀추세*R^2) 높은 순
-    - 포지션 사이징(v6): 역변동성(target_risk=0.016, 단건 상한 10%)
-    - 매도(v6 E3_atr): 이익 중 20일선 이탈 / 손실 중 -2.5*ATR14 또는 200일선 이탈
+    - 신규 매수(v7): 정배열(Close>SMA200 & SMA50>SMA200) + (StochRSI<15 | (IBS<0.20 & Close<SMA5)) & ~VOL_SPIKE_DN
+      * config.json 에서 entry_mode='pullback_v6' 또는 'stoch_v5' 전환 가능
+    - 후보 순위(v7): Clenow90(90일 회귀추세*R^2) 높은 순
+    - 포지션 사이징(v7): 역변동성(target_risk=0.018 * vol_scale, 단건 상한 11%) + 시장 변동성 타게팅(목표 16%, 배율 0.35~1.25)
+    - 매도(v7 E3_atr): 이익 중 20일선 이탈 / 손실 중 -2.5*ATR14 또는 200일선 이탈
  3) 내일 시가에 낼 대기 주문 생성(같은 날 재실행 중복 방지) -> 원자적 저장
  4) 리포트 + dashboard/index.html (+ 선택적 Telegram 요약)
 
@@ -49,8 +49,8 @@ MARKET_CFG = {
 
 # 시장·전략별 백테스트 기대치 (universe200 / US 우량주 65, 2016~2026)
 EXPECT_BY_MODE = {
-    ("KR", "E3_atr"): {"승률%": 59.9, "거래당 평균%": 2.96, "PF": 1.56, "평균 보유일": 21.2},
-    ("US", "E3_atr"): {"승률%": 61.2, "거래당 평균%": 1.48, "PF": 1.69, "평균 보유일": 19.3},
+    ("KR", "E3_atr"): {"승률%": 62.2, "거래당 평균%": 3.92, "PF": 1.72, "평균 보유일": 22.6},
+    ("US", "E3_atr"): {"승률%": 62.4, "거래당 평균%": 1.47, "PF": 1.68, "평균 보유일": 19.0},
     ("KR", "E3"): {"승률%": 38.1, "거래당 평균%": 1.27, "PF": 1.42, "평균 보유일": 11.1},
     ("US", "E3"): {"승률%": 42.1, "거래당 평균%": 0.18, "PF": 1.11, "평균 보유일": 11.0},
     ("KR", "E2"): {"승률%": 30.5, "거래당 평균%": 0.28, "PF": 1.08, "평균 보유일": 11.5},
@@ -244,8 +244,10 @@ def run_check(cfg: dict, market: str = "KR") -> int:
     state_path = (HERE / "state" / "paper_us.json") if (market == "US" and STATE == HERE / "state" / "paper.json") else STATE
     print("=== 주식 자동매매 상태 점검 (--check) ===")
     print(f"- 시장/모드: {market} / {cfg['mode']} (live.enabled={bool(cfg['live'].get('enabled'))})")
-    print(f"- 전략(v6): entry={strat['entry_mode']}, exit={strat['exit_mode']}, rank={strat['rank_by']}, "
-          f"sizing={strat['sizing']}(risk={strat['target_risk']}, cap={strat['max_pos_weight']}), units={cfg['units']}, max_pos={cfg['max_positions']}")
+    print(f"- 전략(v7): entry={strat['entry_mode']}, exit={strat['exit_mode']}, rank={strat['rank_by']}, "
+          f"sizing={strat['sizing']}(risk={strat['target_risk']}, cap={strat['max_pos_weight']}), "
+          f"vol_target={strat.get('vol_targeting', True)}({strat.get('target_mkt_vol', 0.16)}, {strat.get('vol_scale_min', 0.35)}~{strat.get('vol_scale_max', 1.25)}), "
+          f"units={cfg['units']}, max_pos={cfg['max_positions']}")
     print(f"- 키 설정(존재 여부): dart_api_key={bool(local_cfg.get('dart_api_key'))}, "
           f"kiwoom_mock={bool(local_cfg.get('kiwoom_mock_appkey'))}, "
           f"kiwoom_live={bool(local_cfg.get('kiwoom_appkey'))}, "
@@ -299,15 +301,19 @@ def main():
 
     max_pos = int(cfg["max_positions"])
     units = int(cfg["units"])
-    entry_mode = strat.get("entry_mode", "pullback_v6")
+    entry_mode = strat.get("entry_mode", "pullback_v7")
     exit_mode = strat.get("exit_mode", "E3_atr")
     rank_by = strat.get("rank_by", "clenow")
     sizing = strat.get("sizing", "inverse_vol")
-    target_risk = float(strat.get("target_risk", 0.016))
-    max_pos_weight = float(strat.get("max_pos_weight", 0.10))
+    target_risk = float(strat.get("target_risk", 0.018))
+    max_pos_weight = float(strat.get("max_pos_weight", 0.11))
+    vol_targeting = bool(strat.get("vol_targeting", True))
+    target_mkt_vol = float(strat.get("target_mkt_vol", 0.16))
+    vol_scale_min = float(strat.get("vol_scale_min", 0.35))
+    vol_scale_max = float(strat.get("vol_scale_max", 1.25))
     atr_stop_mult = float(strat.get("atr_stop_mult", 2.5))
     hold_add = bool(strat.get("hold_add_under20", False))
-    eval_units = 1 if (entry_mode == "pullback_v6" or sizing == "inverse_vol") else units
+    eval_units = 1 if (entry_mode in ("pullback_v7", "pullback_v6") or sizing == "inverse_vol") else units
 
     s = load_state(cap0, path=state_path)
     wl = load_watchlist(a.top)
@@ -315,6 +321,9 @@ def main():
     bench_df = prices(m_info["bench"])
     mkt_on = bool(bench_df["Close"].iloc[-1] > bench_df["Close"].rolling(200).mean().iloc[-1])
     bench_ret60 = float(bench_df["Close"].iloc[-1] / bench_df["Close"].iloc[-61] - 1) if len(bench_df) >= 61 else 0.0
+    v_scale = strategy.market_vol_scale(
+        bench_df["Close"], target_vol=target_mkt_vol, lo=vol_scale_min, hi=vol_scale_max
+    ) if vol_targeting else 1.0
     asof = bench_df.index[-1]
     asof_str = str(asof.date())
 
@@ -369,7 +378,9 @@ def main():
         clenow90 = round(float(last["CLENOW90"]), 3) if pd.notna(last.get("CLENOW90")) else None
         vol20 = float(last["VOL20"]) if pd.notna(last.get("VOL20")) else None
         rsi2 = round(float(last["RSI2"]), 1) if pd.notna(last.get("RSI2")) else None
+        stoch_rsi = round(float(last["STOCH_RSI"]), 1) if pd.notna(last.get("STOCH_RSI")) else None
         ibs = round(float(last["IBS"]), 2) if pd.notna(last.get("IBS")) else None
+        vol_spike_dn = bool(last.get("VOL_SPIKE_DN", False))
         atr14 = float(last["ATR14"]) if pd.notna(last.get("ATR14")) else 0.0
         held_days = len(pd.bdate_range(pos["opened"], asof)) - 1 if pos else None
         pos_status = ""
@@ -409,8 +420,10 @@ def main():
             "종가": close_disp,
             "%K": round(float(last["K"]), 1),
             "%D": round(float(last["D"]), 1),
+            "StochRSI": stoch_rsi,
             "RSI2": rsi2,
             "IBS": ibs,
+            "거래량급락": vol_spike_dn,
             "Ret60%": round(ret60 * 100, 1) if ret60 is not None else None,
             "RS60": rs60,
             "Clenow90": clenow90,
@@ -425,7 +438,7 @@ def main():
             "신호": sig,
         })
 
-    # 신규 매수: 빈 슬롯만큼, strategy.rank_by 기준 (v6: Clenow90 높은 순)
+    # 신규 매수: 빈 슬롯만큼, strategy.rank_by 기준 (v7: Clenow90 높은 순)
     pend_new_buys = sum(
         1 for o in s["pending"] if o.get("status") is None and o["side"] == "buy" and o["code"] not in s["positions"]
     )
@@ -440,8 +453,10 @@ def main():
         if (r["코드"], "buy") in existing_pend:
             continue
         if sizing == "inverse_vol":
-            amt = strategy.inverse_vol_amount(base_eq, r.get("VOL20"), target_risk=target_risk, max_pos_weight=max_pos_weight)
-            why_lbl = f"BUY invVol"
+            amt = strategy.inverse_vol_amount(
+                base_eq, r.get("VOL20"), target_risk=target_risk, max_pos_weight=max_pos_weight, vol_scale=v_scale
+            )
+            why_lbl = f"BUY invVol(x{v_scale:.2f})"
         else:
             amt = (base_eq / max_pos) / units
             why_lbl = f"BUY 1/{units}"
@@ -488,9 +503,9 @@ def main():
     hist = pd.DataFrame(s["history"])
     md = [
         f"# 일일 신호 {asof:%Y-%m-%d} ({market})",
-        f"- 모드: **{cfg['mode']}** · 전략: **{entry_mode} / {exit_mode} / {rank_by} / {sizing}**"
+        f"- 모드: **{cfg['mode']}** · 전략: **{entry_mode} / {exit_mode} / {rank_by} / {sizing}(x{v_scale:.2f})**"
         + (f" / ⛔ KILL_SWITCH: {kill}" if kill else ""),
-        f"- 시장 필터({m_info['bench_name']} > 200일선): **{'ON' if mkt_on else 'OFF'}**",
+        f"- 시장 필터({m_info['bench_name']} > 200일선): **{'ON' if mkt_on else 'OFF'}** · 변동성 타게팅 배율: **x{v_scale:.2f}**",
         f"- 평가자산 {equity:,.2f}{cur} (초기 {s['capital0']:,.2f}, {100*(equity/s['capital0']-1):+.2f}%) / 현금 {s['cash']:,.2f}{cur} / 보유 {len(s['positions'])}종목",
         "",
         "## 오늘 체결(모의)",
@@ -525,6 +540,8 @@ def main():
         "exit_mode": exit_mode,
         "rank_by": rank_by,
         "sizing": sizing,
+        "vol_scale": round(v_scale, 3),
+        "vol_targeting": vol_targeting,
         "hold_add_under20": hold_add,
         "expect": expect,
         "rows": rows,

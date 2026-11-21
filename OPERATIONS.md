@@ -8,7 +8,7 @@
 git clone https://github.com/Alpha-Crew-Labs/stock-autotrader.git
 cd stock-autotrader
 pip install -r requirements.txt
-python -m pytest -q          # 152건 전부 통과해야 정상
+python -m pytest -q          # 163건 전부 통과해야 정상
 ```
 `config.local.json` 만들기 (이 파일은 GitHub에 안 올라감):
 ```json
@@ -44,7 +44,7 @@ python -m pytest -q          # 152건 전부 통과해야 정상
 | 시각 (평일) | 실행 | 하는 일 |
 |---|---|---|
 | 08:40 | `run_orders.cmd` / `run_orders.sh` | 어제 만든 KR 대기주문을 시장가로 전송 (장전 동시호가 → 시가 체결). paper면 아무것도 안 함 |
-| 16:10 | `run_daily.cmd` / `run_daily.sh` | KR 스크리너 → 잔고/체결 반영 → v6 신호 → 내일 주문 → 리포트·대시보드 |
+| 16:10 | `run_daily.cmd` / `run_daily.sh` | KR 스크리너 → 잔고/체결 반영 → v7 신호 → 내일 주문 → 리포트·대시보드 |
 | (선택) 미국 마감 후 | `python run_daily.py --market US` | `us_bluechips.csv` 65종목 `yfinance` 시세로 US 모의 장부(`state/paper_us.json`, `dashboard_us/`) 갱신 |
 
 - PC가 그 시각에 **켜져 있고 절전이 아니어야** 한다
@@ -61,7 +61,8 @@ python -m pytest -q          # 152건 전부 통과해야 정상
 | 1건 상한 | 주문 1건 금액 상한 | `limits.max_order_krw` |
 | 하루 매수 상한 | 하루 매수 합계 상한 | `limits.max_daily_buy_krw` |
 | 손실 한도 | 하루 -3% 또는 고점 대비 -15% → `KILL_SWITCH` 자동 생성 → 다음 날부터 주문 중지 | `limits.daily_loss_stop_pct`, `max_drawdown_stop_pct` |
-| ATR/200일선 손절 | v6(`E3_atr`)에서 손실 중 종목이 진입가 `-2.5*ATR14` 또는 `SMA200` 이탈 시 자동 매도 | `strategy.atr_stop_mult`, `exit_mode` |
+| 시장 변동성 타게팅 | 지수 20일 실현변동성 급등 시 신규 매수 비중을 `0.35~1.25배`로 자동 조절 | `strategy.vol_targeting`, `target_mkt_vol` |
+| ATR/200일선 손절 | v7(`E3_atr`)에서 손실 중 종목이 진입가 `-2.5*ATR14` 또는 `SMA200` 이탈 시 자동 매도 | `strategy.atr_stop_mult`, `exit_mode` |
 | 긴급 정지 | 폴더에 `KILL_SWITCH` 파일이 있으면 주문 0건. **사람이 직접 만들어도 됨** | 지우면 해제 |
 | 중복 방지 | 같은 날 두 번 실행해도 `run_daily.py` 대기주문 및 `run_orders.py` 주문은 1회만 생성·전송 | `state/orders_날짜.json` |
 | 만료 주문 차단 | `created` 기준 3영업일 초과 미체결 **매수** 대기주문은 아침 전송에서 자동 제외(매도는 유지) | `strategy.max_pending_age_bdays` |

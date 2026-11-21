@@ -41,8 +41,37 @@ def _clenow90(close: pd.Series, w: int = 90) -> np.ndarray:
     return arr
 
 
+def _wilder_rsi(series: pd.Series, period: int) -> pd.Series:
+    """순수 과거 데이터 기반 Wilder RSI 계산."""
+    diff = series.diff()
+    alpha = 1.0 / float(period)
+    up = diff.clip(lower=0).ewm(alpha=alpha, adjust=False).mean()
+    dn = (-diff.clip(upper=0)).ewm(alpha=alpha, adjust=False).mean()
+    rsi = 100.0 - 100.0 / (1.0 + up / dn.replace(0, np.nan))
+    return rsi.where(dn != 0, np.where(up > 0, 100.0, 50.0))
+
+
+def market_vol_scale(
+    bench_close: pd.Series,
+    target_vol: float = 0.16,
+    lo: float = 0.35,
+    hi: float = 1.25,
+) -> float:
+    """벤치마크 20일 실현변동성 기반 포트폴리오 변동성 타게팅 배율 (순수 과거 데이터)."""
+    if bench_close is None or len(bench_close) < 21:
+        return 1.0
+    vol20 = bench_close.pct_change().rolling(20).std() * np.sqrt(252.0)
+    valid = vol20.dropna()
+    if valid.empty:
+        return 1.0
+    v = _finite(valid.iloc[-1])
+    if v is None or v <= 0:
+        return 1.0
+    return float(np.clip(float(target_vol) / max(v, 0.08), float(lo), float(hi)))
+
+
 def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -> pd.DataFrame:
-    """일봉 DataFrame에 스토캐스틱·v6 단기 눌림목(RSI2/IBS)·추세·변동성 지표를 계산한다."""
+    """일봉 DataFrame에 스토캐스틱·v7 StochRSI/IBS/거래량급락·추세·변동성 지표를 계산한다."""
     out = df.copy()
     out = stoch_fn(out) if stoch_fn is not None else stoch(out, n=n, k=k, d=d)
     K, D = out["K"], out["D"]
@@ -67,12 +96,13 @@ def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -
     ).max(axis=1, skipna=False)
     out["ATR14"] = tr.rolling(14).mean()
 
-    # v6 추가 지표 (모두 순수 과거 데이터)
-    diff = close.diff()
-    up = diff.clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
-    dn = (-diff.clip(upper=0)).ewm(alpha=0.5, adjust=False).mean()
-    rsi2 = 100.0 - 100.0 / (1.0 + up / dn.replace(0, np.nan))
-    out["RSI2"] = rsi2.where(dn != 0, np.where(up > 0, 100.0, 50.0))
+    # v6 / v7 추가 지표 (모두 순수 과거 데이터)
+    out["RSI2"] = _wilder_rsi(close, 2)
+    rsi14 = _wilder_rsi(close, 14)
+    r_lo = rsi14.rolling(14).min()
+    r_hi = rsi14.rolling(14).max()
+    raw_sr = 100.0 * (rsi14 - r_lo) / (r_hi - r_lo).replace(0, np.nan)
+    out["STOCH_RSI"] = raw_sr.rolling(3).mean()
 
     rng = high - low
     out["IBS"] = np.where(rng > 0, (close - low) / rng, 0.5)
@@ -83,10 +113,14 @@ def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -
     out["VOL20"] = (close.pct_change().rolling(20).std() * np.sqrt(252.0)).clip(lower=0.10)
     out["SKIP_MOM"] = close.shift(20) / close.shift(120) - 1.0
     out["CLENOW90"] = _clenow90(close, 90)
+    vol_s = out["Volume"] if "Volume" in out else pd.Series(0.0, index=out.index)
+    out["VOL_SPIKE_DN"] = ((close < prev_c) & (vol_s > 2.5 * vol_s.rolling(20).mean())).fillna(False).astype(bool)
 
     aligned = (close > out["SMA200"]) & (out["SMA50"] > out["SMA200"])
     fast_pb = (out["RSI2"] < 10.0) | ((out["IBS"] < 0.20) & (close < out["SMA5"]))
     out["PULLBACK_V6"] = (aligned & fast_pb).fillna(False).astype(bool)
+    fast_pb7 = (out["STOCH_RSI"] < 15.0) | ((out["IBS"] < 0.20) & (close < out["SMA5"]))
+    out["PULLBACK_V7"] = (aligned & fast_pb7 & (~out["VOL_SPIKE_DN"])).fillna(False).astype(bool)
     return out
 
 
@@ -102,8 +136,14 @@ def weekly_ok(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5) -> pd.Serie
     return ok.reindex(df.index, method="ffill").fillna(False).astype(bool)
 
 
-def check_entry(last: pd.Series, mkt_on: bool, entry_mode: str = "pullback_v6") -> tuple[bool, str]:
+def check_entry(last: pd.Series, mkt_on: bool, entry_mode: str = "pullback_v7") -> tuple[bool, str]:
     """신규 매수 진입 여부와 사유 라벨을 반환한다."""
+    if entry_mode == "pullback_v7":
+        if not bool(last.get("PULLBACK_V7", False)):
+            return False, ""
+        if not mkt_on:
+            return False, "매수신호(시장필터 OFF)"
+        return True, "신규매수"
     if entry_mode == "pullback_v6":
         if not bool(last.get("PULLBACK_V6", False)):
             return False, ""
@@ -126,13 +166,15 @@ def check_entry(last: pd.Series, mkt_on: bool, entry_mode: str = "pullback_v6") 
 def inverse_vol_amount(
     equity: float,
     vol20: float | None,
-    target_risk: float = 0.016,
-    max_pos_weight: float = 0.10,
+    target_risk: float = 0.018,
+    max_pos_weight: float = 0.11,
+    vol_scale: float = 1.0,
 ) -> float:
-    """역변동성(Inverse Volatility) 포지션 금액을 계산한다."""
+    """역변동성(Inverse Volatility) + 시장 변동성 타게팅 포지션 금액을 계산한다."""
     v = _finite(vol20)
     eff_vol = max(v, 0.10) if (v is not None and v > 0) else 0.25
-    weight = min(float(max_pos_weight), float(target_risk) / eff_vol)
+    eff_risk = max(float(target_risk) * float(vol_scale), 0.0)
+    weight = min(float(max_pos_weight), eff_risk / eff_vol)
     return max(float(equity), 0.0) * max(weight, 0.0)
 
 
