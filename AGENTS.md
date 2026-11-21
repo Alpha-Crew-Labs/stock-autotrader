@@ -1,18 +1,19 @@
 # AGENTS.md — Stock Autotrader 작업 규칙 (공용 지침)
 
-> 사람이 읽을 설명은 `README.md`(한눈에) · `프로젝트_설명.md`(자세히) · `RESEARCH_V7.md`(v7 한/미 연구) · `RESEARCH_V6.md`(v6 기준선) · `OPERATIONS.md`(실전 운영) · `CONTRIBUTING.md`(협업).
+> 사람이 읽을 설명은 `README.md`(한눈에) · `프로젝트_설명.md`(자세히) · `RESEARCH_V8.md`(v8 최종 연구) · `RESEARCH_V7.md`(v7 연구) · `RESEARCH_V6.md`(v6 기준선) · `OPERATIONS.md`(실전 운영) · `CONTRIBUTING.md`(협업).
 > 이 파일은 **AI가 코드를 고칠 때 지킬 규칙**만 적는다. (`CLAUDE.md`는 `@AGENTS.md` 연결)
 
 ## 프로젝트 한 줄
-한국(`KR_Top200`) · 미국 우량주(`US_BlueChip65`) 멀티마켓 일봉 스윙 자동매매 (**v7: `StochRSI + IBS + NoDistVol + Clenow90 + VolTarget + E3_atr`**). 유튜브 5분봉(`RSI+MACD+Stoch`) 아이디어에서 출발해 Reddit(`r/algotrading`)·정량 검증과 한·미 10년 IS/OOS + Plateau + Monte Carlo(`backtest_research_v7.py`)로 고도화했다.
+한국(`KR_Top200`) · 미국 우량주(`US_BlueChip65`) 멀티마켓 일봉 스윙 자동매매 (**v8 최종본: v7 `StochRSI/IBS/NoDistVol` + `VolRatioBrake(1.50)` + `YellowLight(0.5x)` + `Clenow90` + `E3_atr` + 단기채 현금파킹 `153130`/`BIL`**). 유튜브 5분봉 아이디어에서 출발해 Reddit(`r/algotrading`, `r/quant`) 최신 기법과 한·미 10년 IS/OOS + 2배 비용 스트레스 + Monte Carlo(`backtest_research_v8.py`)로 완성했다.
 
-## 매매 규칙 (현재 v7 기본) — 바꾸려면 반드시 IS/OOS + Random/Plateau + MC95 백테스트 근거와 함께
-- 전략 로직 단일 진실 공급원: `strategy.py` (`prep`, `market_vol_scale`, `check_entry`, `inverse_vol_amount`, `evaluate_position`, `rank_candidates`, `stoch`, `weekly_ok`)
-- 매수 (`entry_mode="pullback_v7"`): `Close > SMA200` & `SMA50 > SMA200` 정배열 + (`STOCH_RSI < 15` | (`IBS < 0.20` & `Close < SMA5`)) & `~VOL_SPIKE_DN` — `strategy.prep` `PULLBACK_V7` (`"pullback_v6"`, `"stoch_v5"` 전환 가능)
+## 매매 규칙 (현재 v8 기본) — 바꾸려면 반드시 IS/OOS + Random/Plateau + MC95 + 2x Stress 백테스트 근거와 함께
+- 전략 로직 단일 진실 공급원: `strategy.py` (`prep`, `market_regime`, `market_vol_scale`, `check_entry`, `inverse_vol_amount`, `evaluate_position`, `rank_candidates`, `stoch`, `weekly_ok`)
+- 매수 (`entry_mode="pullback_v7"`, `pullback_v8` 별칭 동일): `Close > SMA200` & `SMA50 > SMA200` 정배열 + (`STOCH_RSI < 15` | (`IBS < 0.20` & `Close < SMA5`)) & `~VOL_SPIKE_DN` — `strategy.prep` `PULLBACK_V7` (`"pullback_v6"`, `"stoch_v5"` 전환 가능)
+- v8 시장 레짐 (`market_regime`): 벤치마크(`069500`/`SPY`) `<= SMA200` → OFF, `Vol20/Vol60 > 1.50` → `BRAKE`(신규 매수 중지), `SMA200 < Close <= SMA50` → `YELLOW(0.50x)`, 변동성 타게팅(`0.16, 0.35~1.25`)
 - 후보 순위 (`rank_by="clenow"`): 90일 로그 가격 회귀 기울기(연율화) × $R^2$ (`CLENOW90`) 높은 순 (`"rs60"`, `"k"` 전환 가능)
-- 포지션 사이징 (`sizing="inverse_vol"` + `vol_targeting=true`): `총자산 * target_risk(0.018) * market_vol_scale(0.16, 0.35~1.25) / max(VOL20, 0.10)`, 단건 상한 `max_pos_weight(0.11)` 1회 완결 매수
-- 매도 (`exit_mode="E3_atr"`): 이익 중이면 20일선 안착 후 종가 20일선 이탈 시 매도 / 손실 중이면 `Close < entry_px - atr_stop_mult(2.5) * ATR14` 또는 `Close < SMA200` 즉시 매도 — `strategy.evaluate_position`, 근거 `backtest_research_v7.py` · `RESEARCH_V7.md`
-- 시장 필터: KR은 `069500`(KODEX 200) > 200일선, US는 `SPY` > 200일선 (이탈 시 신규 매수 중지)
+- 포지션 사이징 (`sizing="inverse_vol"`): `총자산 * target_risk(0.018) * regime_scale / max(VOL20, 0.10)`, 단건 상한 `max_pos_weight(0.11)` 1회 완결 매수
+- 매도 (`exit_mode="E3_atr"`): 이익 중이면 20일선 안착 후 종가 20일선 이탈 시 매도 / 손실 중이면 `Close < entry_px - atr_stop_mult(2.5) * ATR14` 또는 `Close < SMA200` 즉시 매도 — `strategy.evaluate_position`, 근거 `backtest_research_v8.py` · `RESEARCH_V8.md`
+- 유휴현금 파킹 (`cash_park=true`): KR `153130` / US `BIL` (버퍼 2%, 데드밴드 5%, 5bp). `paper`/`replay`에서는 `s["cash_park"]` 분리 계정에 시가 파킹·선매도, `mock`/`live`는 권고 안내만 출력
 - 관심종목: KR은 `watchlist.csv` 우선, 없으면 `screener.py` 결과(최근 12개월 CB 발행사 제외, `cb_event_study.py` 근거). US는 `us_bluechips.csv`(65종목) 기본 사용
 
 ## 실행 흐름
@@ -34,7 +35,7 @@
 ## 자주 하는 작업
 | 하고 싶은 것 | 어디를 |
 |---|---|
-| 매수/매도·사이징·순위 규칙 바꾸기 | `strategy.py` · `config.json` `strategy` · `settings.py` → `backtest_research_v7.py`로 검증 |
+| 매수/매도·사이징·레짐·순위 규칙 바꾸기 | `strategy.py` · `config.json` `strategy` · `settings.py` → `backtest_research_v8.py`로 검증 |
 | 관심종목 직접 지정 | `watchlist.csv` (KR) / `us_bluechips.csv` (US) |
 | 한도·자금·종목 수·전략 옵션 | `config.json` |
 | 시세 로더(FDR/yfinance)·알림 | `market_data.py`, `notify.py` |

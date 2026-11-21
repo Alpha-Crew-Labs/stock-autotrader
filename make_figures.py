@@ -162,7 +162,7 @@ def fig_example(state):
     a1.legend(loc="upper left", frameon=False, ncol=3, fontsize=10)
     a1.set_ylabel("주가(원)")
     a1.yaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(lambda v, _: f"{v:,.0f}"))
-    title(a1, f"신호 예시 — {name} ({code}), 2026년", f"정배열 단기 눌림목(StochRSI/IBS·NoDistVol) 진입, 이익 시 20일선 이탈까지 보유 · 리플레이 전체 {len(h)}건 중 승률 {100*(h['ret']>0).mean():.0f}%, 거래당 평균 {100*h['ret'].mean():+.1f}%")
+    title(a1, f"신호 예시 — {name} ({code}), 2026년", f"v8 최종본(StochRSI/IBS·NoDistVol) 진입, 이익 시 20일선 이탈까지 보유 · 리플레이 전체 {len(h)}건 중 승률 {100*(h['ret']>0).mean():.0f}%, 거래당 평균 {100*h['ret'].mean():+.1f}%")
     a2.axhspan(0, 20, color=BLUE, alpha=0.08, lw=0)
     a2.axhline(20, color=MUTED, lw=1, ls="--")
     a2.axhline(80, color=MUTED, lw=1, ls="--")
@@ -201,7 +201,7 @@ def fig_replay(state):
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%m월"))
     ax.set_ylabel("시작 = 100")
     title(ax, "2026년 리플레이 — 모의 계좌 vs KODEX 200",
-          "시총 상위 50종목(v7 StochRSI/IBS+NoDistVol+Clenow+VolTarget+E3_atr), 1,000만 원, 매일 장 마감 후 규칙대로 실행 가정")
+          "시총 상위 50종목(v8: StochRSI+VolBrake+노란불+153130 현금파킹), 1,000만 원, 매일 장 마감 후 규칙대로 실행 가정")
     fig.tight_layout()
     fig.savefig(IMG / "replay_equity.png", dpi=150)
     plt.close(fig)

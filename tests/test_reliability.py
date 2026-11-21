@@ -117,7 +117,9 @@ def test_run_daily_idempotent_and_preserves_holding_on_price_error(monkeypatch, 
     monkeypatch.setattr(run_daily, "prices", fake_prices)
     monkeypatch.setattr(run_daily, "load_watchlist", lambda top: {"005930": "삼성전자"})
     monkeypatch.setattr(settings, "KILL", tmp_path / "KILL_SWITCH")
-    monkeypatch.setattr(run_daily, "CFG", settings.load())
+    cfg_no_cp = settings.load()
+    cfg_no_cp["strategy"]["cash_park"] = False  # 시세 오류 시 현금+직전가 보존 검증 전용
+    monkeypatch.setattr(run_daily, "CFG", cfg_no_cp)
     monkeypatch.setattr("sys.argv", ["run_daily.py", "--no-notify"])
 
     run_daily.main()

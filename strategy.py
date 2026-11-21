@@ -1,4 +1,4 @@
-"""전략 엔진 단일 진실 공급원 — 지표·매수/물타기/청산 규칙·역변동성 사이징·후보 순위.
+"""전략 엔진 단일 진실 공급원 — 지표·레짐·매수/물타기/청산 규칙·역변동성 사이징·후보 순위.
 
 백테스트와 실전/모의 실행(screener.py, run_daily.py, backtest_*.py)이 동일한
 함수를 공유해 규칙 불일치를 방지한다. 모든 지표는 순수 과거 데이터만 사용한다.
@@ -70,6 +70,74 @@ def market_vol_scale(
     return float(np.clip(float(target_vol) / max(v, 0.08), float(lo), float(hi)))
 
 
+def market_regime(
+    bench_close: pd.Series,
+    target_vol: float = 0.16,
+    lo: float = 0.35,
+    hi: float = 1.25,
+    vol_ratio_max: float | None = 1.50,
+    yellow_mult: float = 0.50,
+    vol_targeting: bool = True,
+) -> dict:
+    """벤치마크 종가 기준 v8 통합 레짐 판정 (200일선 · 50일선 노란불 · VolRatio 크래시 브레이크 · 변동성 타게팅).
+
+    모든 지표는 `bench_close.iloc[-1]` 이전의 순수 과거 데이터만 사용한다.
+    """
+    if bench_close is None or len(bench_close) == 0:
+        return {
+            "mkt_on": False,
+            "above50": False,
+            "vol20": None,
+            "vol60": None,
+            "vol_ratio": 1.0,
+            "vol_brake": False,
+            "vol_scale": 1.0,
+            "yellow_light": False,
+            "regime_scale": 0.0,
+            "label": "OFF",
+        }
+    last_c = _finite(bench_close.iloc[-1])
+    sma200 = _finite(bench_close.rolling(200).mean().iloc[-1])
+    sma50 = _finite(bench_close.rolling(50).mean().iloc[-1])
+    mkt_on = bool(last_c is not None and sma200 is not None and last_c > sma200)
+    above50 = bool(last_c is not None and sma50 is not None and last_c > sma50)
+
+    rets = bench_close.pct_change()
+    vol20 = _finite((rets.rolling(20).std() * np.sqrt(252.0)).iloc[-1])
+    vol60 = _finite((rets.rolling(60).std() * np.sqrt(252.0)).iloc[-1])
+    vol_ratio = (vol20 / vol60) if (vol20 is not None and vol60 is not None and vol60 > 0) else 1.0
+    vol_brake = bool(vol_ratio_max is not None and vol_ratio > float(vol_ratio_max))
+    vol_scale = market_vol_scale(bench_close, target_vol=target_vol, lo=lo, hi=hi) if vol_targeting else 1.0
+    yellow_light = bool(mkt_on and (not above50))
+    ym = float(yellow_mult)
+
+    if not mkt_on:
+        regime_scale = 0.0
+        label = "OFF"
+    elif vol_brake:
+        regime_scale = 0.0
+        label = "BRAKE(VolRatio)"
+    elif yellow_light:
+        regime_scale = float(vol_scale * ym)
+        label = f"YELLOW(x{ym:.2f})"
+    else:
+        regime_scale = float(vol_scale)
+        label = "ON"
+
+    return {
+        "mkt_on": mkt_on,
+        "above50": above50,
+        "vol20": vol20,
+        "vol60": vol60,
+        "vol_ratio": float(vol_ratio),
+        "vol_brake": vol_brake,
+        "vol_scale": float(vol_scale),
+        "yellow_light": yellow_light,
+        "regime_scale": regime_scale,
+        "label": label,
+    }
+
+
 def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -> pd.DataFrame:
     """일봉 DataFrame에 스토캐스틱·v7 StochRSI/IBS/거래량급락·추세·변동성 지표를 계산한다."""
     out = df.copy()
@@ -136,25 +204,36 @@ def weekly_ok(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5) -> pd.Serie
     return ok.reindex(df.index, method="ffill").fillna(False).astype(bool)
 
 
-def check_entry(last: pd.Series, mkt_on: bool, entry_mode: str = "pullback_v7") -> tuple[bool, str]:
+def check_entry(
+    last: pd.Series,
+    mkt_on: bool,
+    entry_mode: str = "pullback_v7",
+    vol_brake: bool = False,
+) -> tuple[bool, str]:
     """신규 매수 진입 여부와 사유 라벨을 반환한다."""
-    if entry_mode == "pullback_v7":
+    if entry_mode in ("pullback_v8", "pullback_v7"):
         if not bool(last.get("PULLBACK_V7", False)):
             return False, ""
         if not mkt_on:
             return False, "매수신호(시장필터 OFF)"
+        if vol_brake:
+            return False, "매수신호(변동성 브레이크)"
         return True, "신규매수"
     if entry_mode == "pullback_v6":
         if not bool(last.get("PULLBACK_V6", False)):
             return False, ""
         if not mkt_on:
             return False, "매수신호(시장필터 OFF)"
+        if vol_brake:
+            return False, "매수신호(변동성 브레이크)"
         return True, "신규매수"
     if entry_mode == "stoch_v5":
         if not bool(last.get("BUY", False)):
             return False, ""
         if not mkt_on:
             return False, "매수신호(시장필터 OFF)"
+        if vol_brake:
+            return False, "매수신호(변동성 브레이크)"
         if not bool(last.get("TREND", False)):
             return False, "매수신호(종목필터 탈락)"
         if not bool(last.get("WOK", False)):

@@ -72,10 +72,20 @@ for d in cal:
 
 s = r.load_state(0)
 h = pd.DataFrame(s["history"])
-eq = s["cash"] + sum(p["qty"] * float(full[c][full[c].index <= cal[-1]]["Close"].iloc[-1]) for c, p in s["positions"].items())
+cp = s.get("cash_park") or {}
+cp_qty = int(cp.get("qty") or 0)
+cp_code = cp.get("code")
+cp_val = 0.0
+if cp_qty > 0 and cp_code:
+    TODAY = cal[-1]
+    cp_df = cut_prices(cp_code)
+    if len(cp_df):
+        cp_val = cp_qty * float(cp_df["Close"].iloc[-1])
+eq = s["cash"] + cp_val + sum(p["qty"] * float(full[c][full[c].index <= cal[-1]]["Close"].iloc[-1]) for c, p in s["positions"].items())
 cur = "$" if market == "US" else "원"
+cp_txt = f", 현금파킹({cp_code} {cp_qty}주, {cp_val:,.2f}{cur})" if cp_qty > 0 else ""
 print(f"리플레이({market}) {cal[0].date()} ~ {cal[-1].date()} ({len(cal)}거래일), 유니버스 {u_path.name} {len(u)}개")
-print(f"평가자산 {eq:,.2f}{cur} ({100*(eq/s['capital0']-1):+.2f}%), 현금 {s['cash']:,.2f}, 보유 {len(s['positions'])}종목, 대기주문 {len(s['pending'])}건")
+print(f"평가자산 {eq:,.2f}{cur} ({100*(eq/s['capital0']-1):+.2f}%), 현금 {s['cash']:,.2f}{cp_txt}, 보유 {len(s['positions'])}종목, 대기주문 {len(s['pending'])}건")
 if len(h):
     print(f"청산 {len(h)}건, 승률 {100*(h['ret']>0).mean():.0f}%, 평균 {100*h['ret'].mean():+.2f}%")
     print(h.tail(10).to_string(index=False))
