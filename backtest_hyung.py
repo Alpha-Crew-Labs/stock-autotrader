@@ -22,11 +22,7 @@ ETFS = {"069500": "KODEX 200", "122630": "KODEX 레버리지",
         "229200": "KODEX 코스닥150", "233740": "KODEX 코스닥150레버리지"}
 
 
-def stoch(df, n=14, k=5, d=5):
-    lo, hi = df["Low"].rolling(n).min(), df["High"].rolling(n).max()
-    df["K"] = (100 * (df["Close"] - lo) / (hi - lo).replace(0, np.nan)).rolling(k).mean()
-    df["D"] = df["K"].rolling(d).mean()
-    return df
+from strategy import stoch  # noqa: E402
 
 
 def signals(df, mode):

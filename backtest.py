@@ -25,8 +25,9 @@ def universe(n=TOP_N):
     if f.exists():
         return pd.read_csv(f, dtype={"Code": str})
     lst = fdr.StockListing("KOSPI")
-    lst = lst[lst["Code"].str.endswith("0")]  # 우선주 제외
-    u = lst.sort_values("Marcap", ascending=False).head(n)[["Code", "Name"]]
+    lst = lst[lst["Code"].str.endswith("0")].copy()  # 우선주 제외
+    lst["Marcap"] = pd.to_numeric(lst["Marcap"], errors="coerce")
+    u = lst.dropna(subset=["Marcap"]).sort_values("Marcap", ascending=False).head(n)[["Code", "Name"]]
     DATA.mkdir(exist_ok=True)
     u.to_csv(f, index=False, encoding="utf-8-sig")
     return u

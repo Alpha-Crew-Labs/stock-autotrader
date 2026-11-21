@@ -1,4 +1,4 @@
-r"""일간 종목 스크리너 — 일봉 스토캐스틱 스윙 전략(backtest_hyung2) 후보 추리기
+r"""일간 종목 스크리너 — 일봉 스토캐스틱 스윙 전략(strategy.py) 후보 추리기
 
 필터 (백테스트·이벤트 스터디 결과 반영)
   0) 유니버스: KRX 상장 KOSPI·KOSDAQ 보통주 (KONEX 제외)
@@ -6,7 +6,8 @@ r"""일간 종목 스크리너 — 일봉 스토캐스틱 스윙 전략(backtest
   2) CB 제외: 최근 12개월 전환사채권발행결정 공시 회사 (OpenDART B001 + cb-zero-finder 사이트 0%/0% 표시)
   3) 유동성: 20일 평균 거래대금(종가×거래량) ≥ 20억
   4) 추세: 종가 > 200일선, 120일 수익률 > 0
-  출력: RS60(60일 수익률 / 소속 시장지수 60일 수익률) 순위, 스토캐스틱(14,5,5) %K·%D, near_buy_zone(%K<30), buy_signal(전략 매수 신호)
+  출력: RS60(60일 수익률 / 소속 시장지수 60일 수익률) 순위, 스토캐스틱(14,5,5) %K·%D,
+        near_buy_zone(%K<30), buy_signal, weekly_ok, entry_ready
   시장 필터: KODEX200(069500) 종가 > 200일선 여부 출력
 
 실행: python screener.py
@@ -20,13 +21,17 @@ import json
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
+import FinanceDataReader as fdr
 import numpy as np
 import pandas as pd
 import requests
-import FinanceDataReader as fdr
+
+import market_data
+import settings
+from strategy import prep, weekly_ok
 
 HERE = Path(__file__).parent
 CACHE = HERE / "data_screen"
@@ -46,67 +51,33 @@ def log(*a):
     print(*a, flush=True)
 
 
-# ---------------------------------------------------------------- 가격
+# ---------------------------------------------------------------- 가격 (market_data 위임)
 def _fetch(code: str, start: date) -> pd.DataFrame:
-    for i in range(3):
-        try:
-            df = fdr.DataReader(code, start.strftime("%Y-%m-%d"))
-            if df is not None:
-                return df[["Open", "High", "Low", "Close", "Volume"]]
-        except Exception:
-            time.sleep(1 + i)
-    return pd.DataFrame()
+    return market_data.fetch_ohlcv(code, start)
 
 
 def load_prices(code: str, today: date) -> pd.DataFrame:
-    """캐시 사용. 오늘 16시 이후 저장된 캐시면 그대로, 아니면 최근 10일만 다시 받아 덧붙임."""
-    f = PCACHE / f"{code}.csv"
-    if f.exists():
-        old = pd.read_csv(f, index_col=0, parse_dates=True)
-        mtime = datetime.fromtimestamp(f.stat().st_mtime)
-        if mtime.date() == today and mtime.hour >= 16:
-            return old
-        if len(old) and (today - old.index[-1].date()).days < 60:
-            new = _fetch(code, old.index[-1].date() - timedelta(days=10))
-            if len(new):
-                df = pd.concat([old[old.index < new.index[0]], new])
-                df.to_csv(f)
-                return df
-            return old
-    df = _fetch(code, today - timedelta(days=HIST_DAYS))
-    if len(df):
-        df.to_csv(f)
-    return df
-
-
-def stoch(df, n=14, k=5, d=5):
-    lo, hi = df["Low"].rolling(n).min(), df["High"].rolling(n).max()
-    K = (100 * (df["Close"] - lo) / (hi - lo).replace(0, np.nan)).rolling(k).mean()
-    return K, K.rolling(d).mean()
-
-
-def buy_signal(K, D):
-    """backtest_hyung2.prep 의 1차 매수 신호(마지막 봉)."""
-    gap = (K - D).abs()
-    narrow3 = (gap < gap.shift()) & (gap.shift() < gap.shift(2)) & (gap.shift(2) < gap.shift(3))
-    near_os = (K.rolling(5).min() < 20) & (K < 30)
-    gc = (K > D) & (K.shift() <= D.shift())
-    sig = near_os & (((K < D) & narrow3 & (K > K.shift())) | gc)
-    return bool(sig.iloc[-1])
+    return market_data.load_prices(code, days=HIST_DAYS, cache_dir=PCACHE, today=today)
 
 
 # ---------------------------------------------------------------- CB
 def dart_key() -> str:
-    cfg = json.loads((HERE / "config.local.json").read_text(encoding="utf-8"))
-    return cfg["dart_api_key"]
+    return str(settings.load_local_config(HERE / "config.local.json").get("dart_api_key") or "").strip()
 
 
 def _dart_fetch(key: str, bgn: date, end: date) -> list[dict]:
     rows, page = [], 1
     while True:
-        params = dict(crtfc_key=key, bgn_de=bgn.strftime("%Y%m%d"), end_de=end.strftime("%Y%m%d"),
-                      pblntf_detail_ty="B001", page_no=page, page_count=100)
+        params = dict(
+            crtfc_key=key,
+            bgn_de=bgn.strftime("%Y%m%d"),
+            end_de=end.strftime("%Y%m%d"),
+            pblntf_detail_ty="B001",
+            page_no=page,
+            page_count=100,
+        )
         j = None
+        err = ""
         for i in range(3):
             try:
                 r = requests.get(DART_LIST, params=params, timeout=30)
@@ -132,35 +103,66 @@ def _dart_fetch(key: str, bgn: date, end: date) -> list[dict]:
     return rows
 
 
+def _load_cached_dart(cache_dir: Path) -> list[dict]:
+    rows: list[dict] = []
+    for f in sorted(cache_dir.glob("dart_cb_*.json")):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                rows.extend(data.get("rows") or [])
+            elif isinstance(data, list):
+                rows.extend(data)
+        except (OSError, ValueError):
+            continue
+    return rows
+
+
 def dart_cb(today: date, cutoff: date) -> pd.DataFrame:
-    """분기(1·4·7·10월 시작) 단위로 받아 캐시. 지난 분기는 영구, 현재 분기는 실행일마다 갱신."""
+    """분기(1·4·7·10월 시작) 단위로 받아 캐시. 키가 없거나 API 실패 시 캐시로 안전하게 폴백."""
     key = dart_key()
-    rows = []
-    q = date(cutoff.year, 3 * ((cutoff.month - 1) // 3) + 1, 1)
-    while q <= today:
-        nq = date(q.year + (q.month + 3 > 12), (q.month + 2) % 12 + 1, 1)
-        end = nq - timedelta(days=1)
-        if end < today:
-            f = CACHE / f"dart_cb_{q:%Y%m%d}_{end:%Y%m%d}.json"
-            if f.exists():
-                part = json.loads(f.read_text(encoding="utf-8"))
-            else:
-                part = _dart_fetch(key, q, end)
-                f.write_text(json.dumps(part, ensure_ascii=False), encoding="utf-8")
-        else:
-            f = CACHE / "dart_cb_current.json"
-            cur = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
-            if cur.get("asof") == today.isoformat() and cur.get("bgn") == q.isoformat():
-                part = cur["rows"]
-            else:
-                part = _dart_fetch(key, q, today)
-                f.write_text(json.dumps({"asof": today.isoformat(), "bgn": q.isoformat(), "rows": part},
-                                        ensure_ascii=False), encoding="utf-8")
-        rows += part
-        q = nq
-    df = pd.DataFrame(rows, columns=["corp_name", "stock_code", "corp_cls", "report_nm", "rcept_no", "rcept_dt"])
+    cols = ["corp_name", "stock_code", "corp_cls", "report_nm", "rcept_no", "rcept_dt"]
+    rows: list[dict] = []
+    if not key:
+        log("  [경고] config.local.json 에 dart_api_key 없음 → 캐시된 DART CB 목록만 사용")
+        rows = _load_cached_dart(CACHE)
+    else:
+        q = date(cutoff.year, 3 * ((cutoff.month - 1) // 3) + 1, 1)
+        while q <= today:
+            nq = date(q.year + (q.month + 3 > 12), (q.month + 2) % 12 + 1, 1)
+            end = nq - timedelta(days=1)
+            try:
+                if end < today:
+                    f = CACHE / f"dart_cb_{q:%Y%m%d}_{end:%Y%m%d}.json"
+                    if f.exists():
+                        part = json.loads(f.read_text(encoding="utf-8"))
+                    else:
+                        part = _dart_fetch(key, q, end)
+                        f.write_text(json.dumps(part, ensure_ascii=False), encoding="utf-8")
+                else:
+                    f = CACHE / "dart_cb_current.json"
+                    cur = json.loads(f.read_text(encoding="utf-8")) if f.exists() else {}
+                    if cur.get("asof") == today.isoformat() and cur.get("bgn") == q.isoformat():
+                        part = cur["rows"]
+                    else:
+                        part = _dart_fetch(key, q, today)
+                        f.write_text(
+                            json.dumps({"asof": today.isoformat(), "bgn": q.isoformat(), "rows": part}, ensure_ascii=False),
+                            encoding="utf-8",
+                        )
+            except Exception as e:
+                log(f"  [경고] DART CB 조회 실패({type(e).__name__}) {q}~{min(end, today)} → 캐시 폴백")
+                part = _load_cached_dart(CACHE)
+                rows += part
+                break
+            rows += part
+            q = nq
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+    df = pd.DataFrame(rows, columns=cols)
     df = df[df["stock_code"].fillna("").str.strip() != ""]
-    df["rcept_dt"] = pd.to_datetime(df["rcept_dt"], format="%Y%m%d")
+    df["rcept_dt"] = pd.to_datetime(df["rcept_dt"], format="%Y%m%d", errors="coerce")
+    df = df.dropna(subset=["rcept_dt"])
     return df[df["rcept_dt"] >= pd.Timestamp(cutoff)].drop_duplicates("rcept_no")
 
 
@@ -204,6 +206,7 @@ def main():
     # 1) 상장 목록 + 저가 필터
     RAW = fdr.StockListing("KRX")
     L = RAW.copy()
+    L["Marcap"] = pd.to_numeric(L["Marcap"], errors="coerce").fillna(0)
     stage = [("KRX 상장 전체", len(L))]
     L = L[L["Market"].isin(["KOSPI", "KOSDAQ", "KOSDAQ GLOBAL"])].copy()
     L["Mkt"] = np.where(L["Market"] == "KOSPI", "KOSPI", "KOSDAQ")
@@ -241,7 +244,7 @@ def main():
             "Code": code,
             "Name": info["Name"] if info is not None else (d["corp_name"].iloc[0] if len(d) else s["corpName"].iloc[0]),
             "Market": info["Market"] if info is not None else "",
-            "Marcap(억)": round(info["Marcap"] / 1e8) if info is not None else np.nan,
+            "Marcap(억)": round(float(info["Marcap"]) / 1e8) if info is not None and pd.notna(info["Marcap"]) else np.nan,
             "in_universe": code in set(L["Code"]),
             "last_cb_date": max(dates).date() if dates else None,
             "n_cb_dart_12m": len(d),
@@ -263,23 +266,23 @@ def main():
 
     # 3) 가격 다운로드 (병렬, 캐시)
     log(f"가격 데이터 {len(L)}종목 다운로드/캐시 (workers={WORKERS})...")
-    prices, fail = {}, []
+    price_map, fail = {}, []
     with ThreadPoolExecutor(WORKERS) as pool:
         futs = {pool.submit(load_prices, c, today): c for c in L["Code"]}
-        for i, f in enumerate(as_completed(futs), 1):
-            c = futs[f]
+        for i, fut in enumerate(as_completed(futs), 1):
+            c = futs[fut]
             try:
-                df = f.result()
+                df = fut.result()
             except Exception:
                 df = pd.DataFrame()
-            (prices.__setitem__(c, df) if len(df) else fail.append(c))
+            (price_map.__setitem__(c, df) if len(df) else fail.append(c))
             if i % 200 == 0:
                 log(f"  {i}/{len(futs)}")
-    stage.append(("가격 확보", len(prices)))
+    stage.append(("가격 확보", len(price_map)))
 
     rows, short_hist, stale = [], 0, 0
     for _, r in L.iterrows():
-        df = prices.get(r["Code"])
+        df = price_map.get(r["Code"])
         if df is None:
             continue
         df = df[df["Volume"] > 0] if (df["Volume"] > 0).sum() >= 200 else df
@@ -292,7 +295,9 @@ def main():
         c = df["Close"]
         val20 = (c * df["Volume"]).iloc[-20:].mean()
         ma200 = c.iloc[-200:].mean()
-        K, D = stoch(df)
+        f = prep(df)
+        wok = bool(weekly_ok(f).iloc[-1])
+        last = f.iloc[-1]
         rs = (c.iloc[-1] / c.iloc[-61]) / (1 + idx_ret60[r["Mkt"]])
         rows.append({
             "Code": r["Code"], "Name": r["Name"], "Market": r["Market"],
@@ -301,8 +306,11 @@ def main():
             "Ret120%": round((c.iloc[-1] / c.iloc[-121] - 1) * 100, 1),
             "Ret60%": round((c.iloc[-1] / c.iloc[-61] - 1) * 100, 1),
             "RS60": round(rs, 3),
-            "%K": round(K.iloc[-1], 1), "%D": round(D.iloc[-1], 1),
-            "near_buy_zone": bool(K.iloc[-1] < 30), "buy_signal": buy_signal(K, D),
+            "%K": round(float(last["K"]), 1), "%D": round(float(last["D"]), 1),
+            "near_buy_zone": bool(last["K"] < 30),
+            "buy_signal": bool(last["BUY"]),
+            "weekly_ok": wok,
+            "entry_ready": bool(last["BUY"] and last["TREND"] and wok),
         })
     A = pd.DataFrame(rows)
     stage.append((f"히스토리≥201일·최신봉(제외 {short_hist}+{stale})", len(A)))
@@ -312,8 +320,10 @@ def main():
     stage.append(("종가>200일선 & 120일수익>0", len(A)))
     A["RS60_rank"] = A["RS60"].rank(ascending=False, method="min").astype(int)
     A = A.sort_values("RS60_rank")
-    cols = ["Code", "Name", "Market", "Marcap(억)", "AvgValue20(억)", "Close", "MA200gap%", "Ret120%",
-            "Ret60%", "RS60", "RS60_rank", "%K", "%D", "near_buy_zone", "buy_signal"]
+    cols = [
+        "Code", "Name", "Market", "Marcap(억)", "AvgValue20(억)", "Close", "MA200gap%", "Ret120%",
+        "Ret60%", "RS60", "RS60_rank", "%K", "%D", "near_buy_zone", "buy_signal", "weekly_ok", "entry_ready",
+    ]
     A = A[cols]
     outf = OUT / f"candidates_{asof:%Y%m%d}.csv"
     A.to_csv(outf, index=False, encoding="utf-8-sig")
@@ -330,10 +340,10 @@ def main():
         f" 0%/0% {int(exdf['zero_zero_any'].sum()) if len(exdf) else 0}곳 | 사이트 기간 {site_period}")
     if fail:
         log(f"가격 실패 {len(fail)}종목: {', '.join(fail[:10])}{' ...' if len(fail) > 10 else ''}")
-    log(f"최종 후보 {len(A)}종목 (near_buy_zone {int(A['near_buy_zone'].sum())}, buy_signal {int(A['buy_signal'].sum())})")
-    with pd.option_context("display.width", 200, "display.max_columns", 20):
+    log(f"최종 후보 {len(A)}종목 (near_buy_zone {int(A['near_buy_zone'].sum())}, buy_signal {int(A['buy_signal'].sum())}, entry_ready {int(A['entry_ready'].sum())})")
+    with pd.option_context("display.width", 220, "display.max_columns", 20):
         log(A.head(15)[["Code", "Name", "Market", "AvgValue20(억)", "Ret120%", "RS60", "RS60_rank", "%K", "%D",
-                        "near_buy_zone"]].to_string(index=False))
+                        "near_buy_zone", "weekly_ok"]].to_string(index=False))
     log(f"\n저장: {outf}\n      {exf}\n소요 {time.time()-t0:.0f}초")
 
 

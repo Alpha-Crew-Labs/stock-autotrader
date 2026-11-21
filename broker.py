@@ -6,6 +6,7 @@ Broker
   buy(code, qty) / sell(code, qty) -> dict (주문번호 등)  — 시장가
 구현
   KiwoomBroker : kiwoom_client.KiwoomClient 래핑 (mode mock -> 모의 서버, live -> 실전 + allow_live)
+                 read_only=True 일 때는 잔고/예수금 조회만 가능하며 주문 시 PermissionError
   DryRunBroker : 주문을 보내지 않고 기록만 (키 없이 주문 흐름 시험용)
 """
 from __future__ import annotations
@@ -33,32 +34,51 @@ class DryRunBroker:
 
 
 class KiwoomBroker:
-    def __init__(self, mode: str, live_confirmed: bool = False):
+    def __init__(self, mode: str, live_confirmed: bool = False, read_only: bool = False):
         from kiwoom_client import KiwoomClient
+
         if mode not in ("mock", "live"):
             raise ValueError("KiwoomBroker 는 mock / live 모드에서만")
-        if mode == "live" and not live_confirmed:
+        self.read_only = bool(read_only)
+        if not self.read_only and mode == "live" and not live_confirmed:
             raise PermissionError("실전 주문은 config.json live.enabled=true 와 --live 플래그가 모두 필요합니다.")
-        self.name = f"kiwoom-{mode}"
-        self.c = KiwoomClient(mock=(mode == "mock"), allow_live=(mode == "live" and live_confirmed))
+        self.name = f"kiwoom-{mode}{'-ro' if self.read_only else ''}"
+        self.c = KiwoomClient(
+            mock=(mode == "mock"),
+            allow_live=(not self.read_only and mode == "live" and live_confirmed),
+        )
 
     def holdings(self):
         h = self.c.balance()["holdings"]
-        return {r["code"]: {"name": r["name"], "qty": int(r["qty"]), "sellable": int(r["sellable_qty"]),
-                            "avg_price": float(r["avg_price"])} for _, r in h.iterrows() if r["qty"] > 0}
+        return {
+            r["code"]: {
+                "name": r["name"],
+                "qty": int(r["qty"]),
+                "sellable": int(r["sellable_qty"]),
+                "avg_price": float(r["avg_price"]),
+            }
+            for _, r in h.iterrows()
+            if r["qty"] > 0
+        }
 
     def orderable_cash(self):
         return float(self.c.cash()["orderable"])
 
     def buy(self, code, qty):
+        if self.read_only:
+            raise PermissionError("읽기 전용 브로커에서는 매수 주문을 보낼 수 없습니다.")
         return self.c.buy(code, int(qty))
 
     def sell(self, code, qty):
+        if self.read_only:
+            raise PermissionError("읽기 전용 브로커에서는 매도 주문을 보낼 수 없습니다.")
         return self.c.sell(code, int(qty))
 
 
-def get_broker(cfg: dict, live_flag: bool = False, dry_run: bool = False):
+def get_broker(cfg: dict, live_flag: bool = False, dry_run: bool = False, read_only: bool = False):
     if dry_run or cfg["mode"] == "paper":
         return DryRunBroker()
+    if read_only:
+        return KiwoomBroker(cfg["mode"], live_confirmed=False, read_only=True)
     live_ok = cfg["mode"] == "live" and bool(cfg["live"].get("enabled")) and live_flag
-    return KiwoomBroker(cfg["mode"], live_confirmed=live_ok)
+    return KiwoomBroker(cfg["mode"], live_confirmed=live_ok, read_only=False)

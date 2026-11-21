@@ -12,18 +12,9 @@ import pandas as pd
 import backtest as bt
 from backtest_hyung import stoch
 from backtest_hyung2 import prep
+from strategy import weekly_ok
 
 HERE = Path(__file__).parent
-
-
-def weekly_ok(df):
-    w = df.resample("W-FRI").agg({"Open": "first", "High": "max", "Low": "min", "Close": "last", "Volume": "sum"}).dropna()
-    w = stoch(w)
-    ok = w["K"] > w["D"]
-    # 직전 완성 주봉 기준: 주봉 라벨(금요일)을 하루 뒤로 밀어, 그 주가 끝난 '다음 날'부터만 쓰이게 한다.
-    # (월~목 = 지난주 금요일까지의 주봉, 금요일 = 역시 지난주. 진행 중인 이번 주는 절대 안 씀)
-    ok = ok.shift(1, freq="D")
-    return ok.reindex(df.index, method="ffill").fillna(False).astype(bool)
 
 
 def sim(df, mkt_ok, units, late_sell, use_weekly):
