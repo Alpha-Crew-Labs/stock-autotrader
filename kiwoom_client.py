@@ -96,7 +96,7 @@ class KiwoomClient:
     """
 
     def __init__(self, mock: bool = True, allow_live: bool = False, dry_run: bool = False,
-                 config_path: Path | str = CONFIG_PATH, timeout: float = 10.0):
+                 config_path: Path | str | None = None, timeout: float = 10.0):
         self.mock = bool(mock)
         self.allow_live = bool(allow_live)
         self.dry_run = bool(dry_run)
@@ -106,7 +106,7 @@ class KiwoomClient:
         self._last_call = 0.0
         self._token: str | None = None
         self._token_exp: datetime | None = None
-        self._appkey, self._secretkey, self.account = self._load_config(Path(config_path))
+        self._appkey, self._secretkey, self.account = self._load_config(Path(config_path) if config_path is not None else CONFIG_PATH)
 
     # ------------------------------------------------------------------ config
     def _load_config(self, path: Path) -> tuple[str, str, str]:

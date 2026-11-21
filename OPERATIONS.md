@@ -17,7 +17,9 @@ python -m pytest -q          # 전부 통과해야 정상
   "kiwoom_mock_appkey": "모의투자 앱키",
   "kiwoom_mock_secretkey": "모의투자 시크릿",
   "kiwoom_appkey": "실전 앱키 (실전 단계에서만)",
-  "kiwoom_secretkey": "실전 시크릿 (실전 단계에서만)"
+  "kiwoom_secretkey": "실전 시크릿 (실전 단계에서만)",
+  "telegram_bot_token": "(선택) 텔레그램 봇 토큰",
+  "telegram_chat_id": "(선택) 텔레그램 채팅 ID"
 }
 ```
 키움 키 발급 절차는 `KIWOOM_README.md`.
@@ -32,17 +34,18 @@ python -m pytest -q          # 전부 통과해야 정상
 
 실전 켜기 (이중 잠금):
 1. `config.json` → `"mode": "live"`, `"live": {"enabled": true}`
-2. 아침 주문을 `python run_orders.py --live` 로 실행 (`run_orders.cmd`에 `--live` 추가)
+2. 아침 주문을 `python run_orders.py --live` 로 실행 (`run_orders.cmd` 또는 `run_orders.sh`에 `--live` 추가)
 3. 처음 1개월은 `limits.max_order_krw`를 작게(예: 30만 원)
 
-## 2. 매일 일과 (Windows 작업 스케줄러에 등록)
+## 2. 매일 일과 (Windows 작업 스케줄러 또는 macOS/Linux cron·launchd)
 
 | 시각 (평일) | 실행 | 하는 일 |
 |---|---|---|
-| 08:40 | `run_orders.cmd` | 어제 만든 대기주문을 시장가로 전송 (장전 동시호가 → 시가 체결). paper면 아무것도 안 함 |
-| 16:10 | `run_daily.cmd` | 스크리너 → 잔고/체결 반영 → 신호 → 내일 주문 → 리포트·대시보드 |
+| 08:40 | `run_orders.cmd` / `run_orders.sh` | 어제 만든 대기주문을 시장가로 전송 (장전 동시호가 → 시가 체결). paper면 아무것도 안 함 |
+| 16:10 | `run_daily.cmd` / `run_daily.sh` | 스크리너 → 잔고/체결 반영 → 신호 → 내일 주문 → 리포트·대시보드 |
 
 - PC가 그 시각에 **켜져 있고 절전이 아니어야** 한다
+- 상태 진단: `python run_daily.py --check` (상태·파일을 건드리지 않고 설정·키 존재 여부·KILL_SWITCH·최신성만 점검)
 - 기록: `logs/run.log`, `logs/orders.log`, `state/orders_날짜.json`, `reports/daily_날짜.md`
 - 확인: `dashboard/index.html` (점검 항목이 전부 초록이면 정상)
 
@@ -51,18 +54,23 @@ python -m pytest -q          # 전부 통과해야 정상
 | 장치 | 동작 | 설정 |
 |---|---|---|
 | 이중 잠금 | live는 `live.enabled=true` + `--live` 둘 다 있어야 | — |
+| 읽기 전용 잔고 | 오후 장부 맞춤(`run_daily.py`)은 `read_only=True` 브로커만 사용(주문 권한 없음) | — |
 | 1건 상한 | 주문 1건 금액 상한 | `limits.max_order_krw` |
 | 하루 매수 상한 | 하루 매수 합계 상한 | `limits.max_daily_buy_krw` |
 | 손실 한도 | 하루 -3% 또는 고점 대비 -15% → `KILL_SWITCH` 자동 생성 → 다음 날부터 주문 중지 | `limits.daily_loss_stop_pct`, `max_drawdown_stop_pct` |
 | 긴급 정지 | 폴더에 `KILL_SWITCH` 파일이 있으면 주문 0건. **사람이 직접 만들어도 됨** | 지우면 해제 |
-| 중복 방지 | 같은 날 두 번 실행해도 주문은 한 번 | `state/orders_날짜.json` |
+| 중복 방지 | 같은 날 두 번 실행해도 `run_daily.py` 대기주문 및 `run_orders.py` 주문은 1회만 생성·전송 | `state/orders_날짜.json` |
+| 만료 주문 차단 | `created` 기준 3영업일 초과 미체결 **매수** 대기주문은 아침 전송에서 자동 제외(매도는 유지) | `strategy.max_pending_age_bdays` |
+| 시세 오류 격리 | 보유종목 시세 조회 실패 시 직전가로 평가 유지(거짓 손실한도 방지), 주문 시 종목별 예외 격리 | — |
+| 원자적 저장 | 임시 파일 기록 후 교체(`os.replace`)로 동기화 중 상태 파일 손상 방지 | — |
 | 잔고 우선 | 매도 수량·보유 종목은 증권사 잔고 기준 (수동 매매도 반영) | — |
 
 ## 4. 문제가 생기면
 
 | 증상 | 확인 / 조치 |
 |---|---|
-| 대시보드 "데이터 최신성" 노랑·빨강 | 16:10 실행이 안 됨 → PC 절전·스케줄러 확인, `logs/run.log` |
+| 대시보드 "데이터 최신성" 노랑·빨강 | 16:10 실행이 안 됨 → PC 절전·스케줄러 경로 확인, `logs/run.log` |
+| "만료된 대기주문" 건너뜀 | 3영업일 넘게 체결되지 않은 매수 주문 자동 차단. 당일 오후 신호로 재판단 |
 | "미체결" 로그 | 상한가·거래정지 등. 다음 날 신호로 다시 판단 (자동) |
 | "장부에 없던 보유" | 수동으로 산 종목. 장부에 1회 매수로 편입됨 |
 | 키움 오류 8010 | 등록하지 않은 IP → 키움 사이트에서 IP 등록 |

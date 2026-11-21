@@ -18,7 +18,9 @@ def _fake():
                      "units": 2, "ret": 0.0321}],
     }
     snap = {"asof": "2026-11-11", "mkt_on": True, "last_run": "2026-11-11 16:00",
-            "rows": [{"코드": "005930", "종목": "삼성전자", "종가": 71000, "%K": 15.2, "%D": 12.1, "신호": "BUY"},
+            "max_positions": 10, "units": 3, "exit_mode": "E3", "rank_by": "rs60",
+            "log": ["- 매수 체결 삼성전자 50주"],
+            "rows": [{"코드": "005930", "종목": "삼성전자", "종가": 71000, "%K": 15.2, "%D": 12.1, "주봉OK": True, "추세OK": True, "RS60": 1.15, "신호": "BUY"},
                      {"코드": "000660", "종목": "SK하이닉스", "종가": 180000, "%K": 50, "%D": 55, "신호": ""}]}
     k200 = pd.Series([35000.0, 35100.0, 35300.0, 35200.0],
                      index=pd.to_datetime(["2026-11-06", "2026-11-09", "2026-11-10", "2026-11-11"]))
@@ -30,13 +32,15 @@ def test_build_writes_index_html(tmp_path):
     out = dashboard.build(state, snap, k200, tmp_path / "dash")
     assert out == tmp_path / "dash" / "index.html"
     page = out.read_text(encoding="utf-8")
-    for sec in ("점검", "보유 종목", "내일 시가 주문(대기)", "오늘 신호", "실전 vs 백테스트 기대치", "최근 청산"):
+    for sec in ("점검", "보유 종목", "내일 시가 주문(대기)", "오늘 신호", "매수 임박 관심종목", "실전 vs 백테스트 기대치", "최근 청산", "오늘 실행 로그"):
         assert sec in page, sec
     assert "삼성전자" in page and "LG화학" in page and "+3.21%" in page
     assert "10,120,000원" in page                 # 평가자산 타일
     assert "ON · 매수 가능" in page
     assert "&lt;SK하이닉스&gt;" in page and "<SK하이닉스>" not in page   # HTML 이스케이프
     assert '"d": "2026-11-11"' in page             # 차트 데이터
+    assert '"dd": 0.0' in page                     # 낙폭 데이터
+    assert "매수 체결 삼성전자" in page
 
 
 def test_build_empty_state(tmp_path):

@@ -18,26 +18,14 @@ import numpy as np
 import pandas as pd
 import backtest as bt
 from backtest_hyung import stoch
+from strategy import UNITS, prep as _prep
 
 HERE = Path(__file__).parent
 OUT = HERE / "results"
-UNITS = 3
 
 
 def prep(df):
-    df = stoch(df.copy())
-    K, D = df["K"], df["D"]
-    gap = (K - D).abs()
-    narrow3 = (gap < gap.shift()) & (gap.shift() < gap.shift(2)) & (gap.shift(2) < gap.shift(3))
-    near_os = (K.rolling(5).min() < 20) & (K < 30)
-    gc = (K > D) & (K.shift() <= D.shift())
-    dc = (K < D) & (K.shift() >= D.shift())
-    df["BUY"] = near_os & (((K < D) & narrow3 & (K > K.shift())) | gc)
-    wid2 = ((D - K) > (D - K).shift()) & ((D - K).shift() > (D - K).shift(2))
-    df["ADD"] = (K < 20) & (K < D) & wid2
-    df["SELL"] = ((K > D) & narrow3 & (K < K.shift())) | dc
-    df["TREND"] = (df["Close"] > df["Close"].rolling(200).mean()) & (df["Close"].pct_change(120) > 0)
-    return df
+    return _prep(df, stoch_fn=stoch)
 
 
 def sim(df, mkt_ok, use_mkt, use_stock):

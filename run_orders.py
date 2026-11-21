@@ -7,16 +7,26 @@ r"""아침 주문 (평일 08:30~08:55): 어제 장 마감 후 run_daily.py 가 �
 안전장치 (하나라도 걸리면 주문 0건)
 - KILL_SWITCH 파일 존재 (손실 한도 초과 시 run_daily.py 가 자동 생성 / 사람이 만들어도 됨)
 - 주말, 이미 오늘 주문 전송함(중복 방지)
+- 오래된 매수 대기주문(max_pending_age_bdays 영업일 초과) 차단 (매도는 리스크 청산이므로 유지)
+- 종목별 가격 조회 오류 격리(1종목 실패가 다른 주문을 막지 않음)
 - 1건 상한 limits.max_order_krw, 하루 매수 합계 상한 limits.max_daily_buy_krw, 주문가능현금 초과분은 잘라냄
 매도는 증권사 잔고의 매도가능수량 기준 (장부와 다르면 잔고가 우선)
 
-실행: python run_orders.py [--dry-run] [--live]
+실행: python run_orders.py [--dry-run] [--live] [--no-notify]
 결과: state/orders_YYYYMMDD.json, state/paper.json 의 대기주문에 status=submitted 표시
 """
-from pathlib import Path
-import argparse, json, math
+from __future__ import annotations
+
+import argparse
 import datetime as dt
-import FinanceDataReader as fdr
+import json
+import math
+from pathlib import Path
+
+import pandas as pd
+
+import market_data
+import notify
 import settings
 from broker import get_broker
 
@@ -24,26 +34,41 @@ HERE = Path(__file__).parent
 STATE = HERE / "state" / "paper.json"
 
 
-def prev_close(code):
-    d = fdr.DataReader(code, (dt.date.today() - dt.timedelta(days=15)).isoformat())
+def prev_close(code: str) -> float:
+    d = market_data.fetch_ohlcv(code, dt.date.today() - dt.timedelta(days=15))
+    if d.empty:
+        raise ValueError(f"최근 종가 없음: {code}")
     return float(d["Close"].iloc[-1])
 
 
-def plan_orders(state, holdings, cash, cfg, price_fn=prev_close):
+def plan_orders(state, holdings, cash, cfg, price_fn=prev_close, today=None):
     """대기주문 -> 실제 주문 목록 [(side, code, name, qty, why)] + 건너뛴 사유. (테스트 가능하도록 분리)"""
     lim = cfg["limits"]
+    buf = float(lim.get("buy_price_buffer_pct", 0.003))
+    max_age = int(cfg.get("strategy", {}).get("max_pending_age_bdays", 3))
     orders, skipped, buy_total = [], [], 0.0
     pend = [o for o in state.get("pending", []) if o.get("status") is None]
+
     for o in [p for p in pend if p["side"] == "sell"]:
         h = holdings.get(o["code"])
         if not h or h["sellable"] <= 0:
             skipped.append(f"매도 생략 {o['name']}: 증권사 잔고 없음")
             continue
         orders.append(("sell", o["code"], o["name"], h["sellable"], o["why"]))
+
     for o in [p for p in pend if p["side"] == "buy"]:
-        px = price_fn(o["code"])
+        if today is not None and o.get("created"):
+            age = len(pd.bdate_range(pd.Timestamp(o["created"]), pd.Timestamp(today))) - 1
+            if age > max_age:
+                skipped.append(f"매수 생략 {o['name']}: 만료된 대기주문 ({age}영업일 경과)")
+                continue
+        try:
+            px = price_fn(o["code"])
+        except Exception as e:
+            skipped.append(f"매수 생략 {o['name']}: 가격 조회 오류 ({type(e).__name__})")
+            continue
         amt = min(o["amount"], lim["max_order_krw"], lim["max_daily_buy_krw"] - buy_total, cash - buy_total)
-        qty = math.floor(amt / (px * 1.003)) if px > 0 and amt > 0 else 0   # 시가 갭 여유 0.3%
+        qty = math.floor(amt / (px * (1 + buf))) if px > 0 and amt > 0 else 0
         if qty <= 0:
             skipped.append(f"매수 생략 {o['name']}: 한도/현금 부족 (요청 {o['amount']:,.0f}원)")
             continue
@@ -56,6 +81,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true", help="주문을 보내지 않고 계획만 출력")
     ap.add_argument("--live", action="store_true", help="실전 주문 확인 플래그 (config live.enabled 도 필요)")
+    ap.add_argument("--no-notify", action="store_true", help="텔레그램 알림 전송 생략")
     a = ap.parse_args()
     cfg = settings.load()
     today = dt.date.today()
@@ -66,6 +92,8 @@ def main():
         return
     if (r := settings.kill_reason()):
         print(f"[중지] KILL_SWITCH: {r}  -> 주문 0건. 해제하려면 KILL_SWITCH 파일 삭제")
+        if not a.dry_run and not a.no_notify:
+            notify.send_telegram(notify.format_order_summary(cfg["mode"], cfg["mode"], 0.0, [], [], kill=r))
         return
     if today.weekday() >= 5:
         print("주말: 주문 없음")
@@ -79,11 +107,16 @@ def main():
 
     state = json.loads(STATE.read_text(encoding="utf-8"))
     broker = get_broker(cfg, live_flag=a.live, dry_run=a.dry_run)
-    holdings = broker.holdings() if not a.dry_run else {
-        c: {"name": p["name"], "qty": p["qty"], "sellable": p["qty"], "avg_price": p["cost"] / max(p["qty"], 1)}
-        for c, p in state["positions"].items()}
+    holdings = (
+        broker.holdings()
+        if not a.dry_run
+        else {
+            c: {"name": p["name"], "qty": p["qty"], "sellable": p["qty"], "avg_price": p["cost"] / max(p["qty"], 1)}
+            for c, p in state["positions"].items()
+        }
+    )
     cash = broker.orderable_cash() if not a.dry_run else state["cash"]
-    orders, skipped = plan_orders(state, holdings, cash, cfg)
+    orders, skipped = plan_orders(state, holdings, cash, cfg, today=today)
 
     print(f"[{broker.name}] 모드 {cfg['mode']}, 주문가능현금 {cash:,.0f}원, 주문 {len(orders)}건")
     results = []
@@ -100,12 +133,20 @@ def main():
 
     if not a.dry_run:
         for o in state["pending"]:
+            if o.get("status") is not None:
+                continue
             hit = next((r for r in results if r["code"] == o["code"] and r["side"] == o["side"]), None)
             if hit and hit["ok"]:
                 o.update(status="submitted", qty=hit["qty"], submitted=dt.datetime.now().isoformat(timespec="seconds"))
-        STATE.write_text(json.dumps(state, ensure_ascii=False, indent=1), encoding="utf-8")
-        log_f.write_text(json.dumps({"mode": cfg["mode"], "broker": broker.name, "cash": cash, "orders": results,
-                                     "skipped": skipped}, ensure_ascii=False, indent=1, default=str), encoding="utf-8")
+        settings.atomic_write_json(STATE, state, indent=1)
+        settings.atomic_write_json(
+            log_f,
+            {"mode": cfg["mode"], "broker": broker.name, "cash": cash, "orders": results, "skipped": skipped},
+            indent=1,
+            default=str,
+        )
+        if not a.no_notify and (results or skipped):
+            notify.send_telegram(notify.format_order_summary(cfg["mode"], broker.name, cash, results, skipped))
 
 
 if __name__ == "__main__":
