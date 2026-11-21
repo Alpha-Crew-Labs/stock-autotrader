@@ -16,7 +16,7 @@ HERE = Path(__file__).parent
 KILL = HERE / "KILL_SWITCH"
 MODES = ("paper", "mock", "live")
 VALID_MARKETS = ("KR", "US")
-VALID_ENTRY_MODES = ("pullback_v6", "stoch_v5")
+VALID_ENTRY_MODES = ("pullback_v7", "pullback_v6", "stoch_v5")
 VALID_EXIT_MODES = ("E0", "E2", "E3", "E3_atr", "E4", "chandelier", "meanrev")
 VALID_RANK_BY = ("clenow", "rs60", "k")
 VALID_SIZING = ("inverse_vol", "equal")
@@ -36,12 +36,16 @@ DEFAULTS = {
     },
     "strategy": {
         "market": "KR",
-        "entry_mode": "pullback_v6",
+        "entry_mode": "pullback_v7",
         "exit_mode": "E3_atr",
         "rank_by": "clenow",
         "sizing": "inverse_vol",
-        "target_risk": 0.016,
-        "max_pos_weight": 0.10,
+        "target_risk": 0.018,
+        "max_pos_weight": 0.11,
+        "vol_targeting": True,
+        "target_mkt_vol": 0.16,
+        "vol_scale_min": 0.35,
+        "vol_scale_max": 1.25,
         "atr_stop_mult": 2.5,
         "max_pending_age_bdays": 3,
         "hold_add_under20": False,
@@ -74,6 +78,13 @@ def load(path: Path = HERE / "config.json") -> dict:
         raise ValueError(f"strategy.rank_by 는 {VALID_RANK_BY} 중 하나여야 합니다: {st['rank_by']}")
     if st["sizing"] not in VALID_SIZING:
         raise ValueError(f"strategy.sizing 는 {VALID_SIZING} 중 하나여야 합니다: {st['sizing']}")
+    tmv = float(st.get("target_mkt_vol", 0.16))
+    vmin = float(st.get("vol_scale_min", 0.35))
+    vmax = float(st.get("vol_scale_max", 1.25))
+    if tmv <= 0:
+        raise ValueError(f"strategy.target_mkt_vol 는 0보다 커야 합니다: {tmv}")
+    if not (0 < vmin <= vmax <= 2.0):
+        raise ValueError(f"strategy.vol_scale_min/max 범위 오류: {vmin}, {vmax}")
     return cfg
 
 

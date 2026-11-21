@@ -15,8 +15,8 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).parent
-# 백테스트(2016~2026, 시총상위200 v6 보수형 M2c) 기대치 — 실전 성과 비교용
-EXPECT = {"승률%": 59.9, "거래당 평균%": 2.96, "PF": 1.56, "평균 보유일": 21.2}
+# 백테스트(2016~2026, 시총상위200 v7 StochRSI+IBS+VT+NoDist) 기대치 — 실전 성과 비교용
+EXPECT = {"승률%": 62.2, "거래당 평균%": 3.92, "PF": 1.72, "평균 보유일": 22.6}
 
 
 def _fmt(x, nd=0):
@@ -78,10 +78,12 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
     market = snap.get("market", "KR")
     max_pos = int(snap.get("max_positions", 10))
     units = int(snap.get("units", 1))
-    entry_mode = snap.get("entry_mode", "pullback_v6")
+    entry_mode = snap.get("entry_mode", "pullback_v7")
     exit_mode = snap.get("exit_mode", "E3_atr")
     rank_by = snap.get("rank_by", "clenow")
     sizing = snap.get("sizing", "inverse_vol")
+    vol_scale = snap.get("vol_scale")
+    vol_txt = f" x{float(vol_scale):.2f}" if vol_scale is not None else ""
     expect = snap.get("expect") or EXPECT
 
     eq = pd.DataFrame(state.get("equity_log", []))
@@ -159,7 +161,7 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
 
     sig_rows = [
         [r["종목"], r["코드"], _fmt(r.get("종가") or 0, nd_px),
-         r.get("RSI2") if r.get("RSI2") is not None else r.get("%K", ""),
+         r.get("StochRSI") if r.get("StochRSI") is not None else (r.get("RSI2") if r.get("RSI2") is not None else r.get("%K", "")),
          r.get("IBS") if r.get("IBS") is not None else r.get("%D", ""),
          r.get("Clenow90") if r.get("Clenow90") is not None else (r.get("RS60") if r.get("RS60") is not None else "-"),
          r["신호"]]
@@ -170,9 +172,9 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
     for r in snap.get("rows", []):
         if r.get("메모"):
             continue
-        k_val, rsi2_val, ibs_val = r.get("%K"), r.get("RSI2"), r.get("IBS")
+        k_val, rsi2_val, ibs_val, sr_val = r.get("%K"), r.get("RSI2"), r.get("IBS"), r.get("StochRSI")
         hit = False
-        for val, thr in ((rsi2_val, 15.0), (ibs_val, 0.25), (k_val, 30.0)):
+        for val, thr in ((sr_val, 20.0), (rsi2_val, 15.0), (ibs_val, 0.25), (k_val, 30.0)):
             if val is not None:
                 try:
                     if float(val) < thr:
@@ -183,11 +185,13 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
             radar_cands.append(r)
 
     def _radar_sort_key(r):
+        if r.get("StochRSI") is not None:
+            return (0, float(r["StochRSI"]))
         if r.get("RSI2") is not None:
-            return (0, float(r["RSI2"]))
+            return (1, float(r["RSI2"]))
         if r.get("%K") is not None:
-            return (1, float(r["%K"]))
-        return (2, 999.0)
+            return (2, float(r["%K"]))
+        return (3, 999.0)
 
     radar_cands.sort(key=_radar_sort_key)
     radar_rows = [
@@ -195,9 +199,10 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
             r["종목"],
             r["코드"],
             _fmt(r.get("종가") or 0, nd_px),
-            r.get("%K", "-"),
+            r.get("StochRSI") if r.get("StochRSI") is not None else "-",
             r.get("RSI2") if r.get("RSI2") is not None else "-",
             r.get("IBS") if r.get("IBS") is not None else "-",
+            r.get("%K", "-"),
             "✓" if (r.get("정배열") or r.get("추세OK")) else "-",
             r.get("Clenow90") if r.get("Clenow90") is not None else (r.get("RS60") if r.get("RS60") is not None else "-"),
             r.get("신호") or ("보유 중" if r.get("보유") else "대기"),
@@ -264,7 +269,7 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 #tip{{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px #0002}}
 </style></head><body><main>
 <h1>주식 자동매매 — 모의 장부</h1>
-<p class="sub">v6 ({html.escape(market)} · {html.escape(entry_mode)} · {html.escape(exit_mode)} · {html.escape(rank_by)} · {html.escape(sizing)}) · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
+<p class="sub">v7 ({html.escape(market)} · {html.escape(entry_mode)} · {html.escape(exit_mode)} · {html.escape(rank_by)} · {html.escape(sizing)}{html.escape(vol_txt)}) · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
 <div class="tiles">
 <div class="tile"><div class="k">평가자산</div><div class="v">{_money(equity, cur)}</div></div>
 <div class="tile"><div class="k">누적 수익률</div><div class="v">{ret:+.2f}%</div></div>
@@ -281,8 +286,8 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 <span><i class="sw" style="background:var(--s2)"></i>{html.escape(bench_name)}</span></div><div id="chart"></div></div>
 <h2>보유 종목</h2>{table(["종목","코드","수량","평단","현재가","손익","매수횟수","진입일","보유일","%K/%D","추적상태"], pos_rows)}
 <h2>내일 시가 주문(대기)</h2>{table(["구분","종목","코드","사유","금액","생성일"], pend_rows)}
-<h2>오늘 신호</h2>{table(["종목","코드","종가","RSI2/%K","IBS/%D","Clenow90","신호"], sig_rows)}
-<h2>매수 임박 관심종목 (%K &lt; 30 · RSI2 &lt; 15)</h2>{table(["종목","코드","종가","%K","RSI2","IBS","정배열","Clenow90","상태"], radar_rows)}
+<h2>오늘 신호</h2>{table(["종목","코드","종가","StochRSI/RSI2/%K","IBS/%D","Clenow90","신호"], sig_rows)}
+<h2>매수 임박 관심종목 (StochRSI &lt; 20 · RSI2 &lt; 15 · %K &lt; 30)</h2>{table(["종목","코드","종가","StochRSI","RSI2","IBS","%K","정배열","Clenow90","상태"], radar_rows)}
 <h2>실전 vs 백테스트 기대치</h2>{table(["지표","백테스트","모의 실적"], cmp_rows)}
 <h2>최근 청산 (최대 30건)</h2>{table(["종목","코드","진입","청산","매수횟수","수익률","사유"], hist_rows)}
 <h2>오늘 실행 로그</h2><div class="card">{log_html}</div>

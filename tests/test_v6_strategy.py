@@ -109,7 +109,7 @@ def test_is_us_ticker_and_settings_validation(tmp_path):
     assert market_data.is_us_ticker("005930") is False
 
     cfg = settings.load()
-    assert cfg["strategy"]["entry_mode"] == "pullback_v6"
+    assert cfg["strategy"]["entry_mode"] == "pullback_v7"
     assert cfg["strategy"]["exit_mode"] == "E3_atr"
     assert cfg["strategy"]["sizing"] == "inverse_vol"
 
