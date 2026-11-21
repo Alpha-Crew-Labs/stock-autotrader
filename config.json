@@ -13,8 +13,14 @@
     "buy_price_buffer_pct": 0.003
   },
   "strategy": {
-    "exit_mode": "E3",
-    "rank_by": "rs60",
+    "market": "KR",
+    "entry_mode": "pullback_v6",
+    "exit_mode": "E3_atr",
+    "rank_by": "clenow",
+    "sizing": "inverse_vol",
+    "target_risk": 0.016,
+    "max_pos_weight": 0.10,
+    "atr_stop_mult": 2.5,
     "max_pending_age_bdays": 3,
     "hold_add_under20": false
   },

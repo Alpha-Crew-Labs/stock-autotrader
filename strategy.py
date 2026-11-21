@@ -1,4 +1,4 @@
-"""전략 엔진 단일 진실 공급원 — 지표·매수/물타기/청산 규칙·후보 순위.
+"""전략 엔진 단일 진실 공급원 — 지표·매수/물타기/청산 규칙·역변동성 사이징·후보 순위.
 
 백테스트와 실전/모의 실행(screener.py, run_daily.py, backtest_*.py)이 동일한
 함수를 공유해 규칙 불일치를 방지한다. 모든 지표는 순수 과거 데이터만 사용한다.
@@ -21,8 +21,28 @@ def stoch(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5) -> pd.DataFrame
     return df
 
 
+def _clenow90(close: pd.Series, w: int = 90) -> np.ndarray:
+    """90일 로그주가 선형회귀 연율화 기울기 * R^2 (순수 과거 데이터)."""
+    arr = np.full(len(close), np.nan, dtype=float)
+    log_c = np.log(close.values.astype(float))
+    if len(log_c) < w:
+        return arr
+    x = np.arange(w, dtype=float)
+    xc = x - x.mean()
+    var_x = float(np.sum(xc ** 2))
+    wins = np.lib.stride_tricks.sliding_window_view(log_c, w)
+    dy = wins - wins.mean(axis=1, keepdims=True)
+    cov = dy @ xc
+    slope = cov / var_x
+    ss_tot = np.sum(dy ** 2, axis=1)
+    r2 = np.where(ss_tot > 1e-12, (cov ** 2) / (var_x * ss_tot), 0.0)
+    ann = np.exp(np.clip(slope * 252.0, -5.0, 5.0)) - 1.0
+    arr[w - 1 :] = ann * r2
+    return arr
+
+
 def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -> pd.DataFrame:
-    """일봉 DataFrame에 스토캐스틱·추세·변동성 지표와 BUY/ADD/SELL/TREND 신호를 계산한다."""
+    """일봉 DataFrame에 스토캐스틱·v6 단기 눌림목(RSI2/IBS)·추세·변동성 지표를 계산한다."""
     out = df.copy()
     out = stoch_fn(out) if stoch_fn is not None else stoch(out, n=n, k=k, d=d)
     K, D = out["K"], out["D"]
@@ -36,16 +56,37 @@ def prep(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5, stoch_fn=None) -
     out["ADD"] = ((K < 20) & (K < D) & wid2).fillna(False).astype(bool)
     out["SELL"] = (((K > D) & narrow3 & (K < K.shift())) | dc).fillna(False).astype(bool)
 
-    close = out["Close"]
+    close, high, low = out["Close"], out["High"], out["Low"]
     out["TREND"] = ((close > close.rolling(200).mean()) & (close.pct_change(120) > 0)).fillna(False).astype(bool)
     out["MA20"] = close.rolling(20).mean()
     out["RET60"] = close.pct_change(60)
     prev_c = close.shift(1)
     tr = pd.concat(
-        [(out["High"] - out["Low"]).abs(), (out["High"] - prev_c).abs(), (out["Low"] - prev_c).abs()],
+        [(high - low).abs(), (high - prev_c).abs(), (low - prev_c).abs()],
         axis=1,
     ).max(axis=1, skipna=False)
     out["ATR14"] = tr.rolling(14).mean()
+
+    # v6 추가 지표 (모두 순수 과거 데이터)
+    diff = close.diff()
+    up = diff.clip(lower=0).ewm(alpha=0.5, adjust=False).mean()
+    dn = (-diff.clip(upper=0)).ewm(alpha=0.5, adjust=False).mean()
+    rsi2 = 100.0 - 100.0 / (1.0 + up / dn.replace(0, np.nan))
+    out["RSI2"] = rsi2.where(dn != 0, np.where(up > 0, 100.0, 50.0))
+
+    rng = high - low
+    out["IBS"] = np.where(rng > 0, (close - low) / rng, 0.5)
+    out["SMA5"] = close.rolling(5).mean()
+    out["SMA50"] = close.rolling(50).mean()
+    out["SMA100"] = close.rolling(100).mean()
+    out["SMA200"] = close.rolling(200).mean()
+    out["VOL20"] = (close.pct_change().rolling(20).std() * np.sqrt(252.0)).clip(lower=0.10)
+    out["SKIP_MOM"] = close.shift(20) / close.shift(120) - 1.0
+    out["CLENOW90"] = _clenow90(close, 90)
+
+    aligned = (close > out["SMA200"]) & (out["SMA50"] > out["SMA200"])
+    fast_pb = (out["RSI2"] < 10.0) | ((out["IBS"] < 0.20) & (close < out["SMA5"]))
+    out["PULLBACK_V6"] = (aligned & fast_pb).fillna(False).astype(bool)
     return out
 
 
@@ -61,25 +102,75 @@ def weekly_ok(df: pd.DataFrame, n: int = 14, k: int = 5, d: int = 5) -> pd.Serie
     return ok.reindex(df.index, method="ffill").fillna(False).astype(bool)
 
 
+def check_entry(last: pd.Series, mkt_on: bool, entry_mode: str = "pullback_v6") -> tuple[bool, str]:
+    """신규 매수 진입 여부와 사유 라벨을 반환한다."""
+    if entry_mode == "pullback_v6":
+        if not bool(last.get("PULLBACK_V6", False)):
+            return False, ""
+        if not mkt_on:
+            return False, "매수신호(시장필터 OFF)"
+        return True, "신규매수"
+    if entry_mode == "stoch_v5":
+        if not bool(last.get("BUY", False)):
+            return False, ""
+        if not mkt_on:
+            return False, "매수신호(시장필터 OFF)"
+        if not bool(last.get("TREND", False)):
+            return False, "매수신호(종목필터 탈락)"
+        if not bool(last.get("WOK", False)):
+            return False, "매수신호(주봉 하락 중)"
+        return True, "신규매수"
+    raise ValueError(f"지원하지 않는 entry_mode: {entry_mode}")
+
+
+def inverse_vol_amount(
+    equity: float,
+    vol20: float | None,
+    target_risk: float = 0.016,
+    max_pos_weight: float = 0.10,
+) -> float:
+    """역변동성(Inverse Volatility) 포지션 금액을 계산한다."""
+    v = _finite(vol20)
+    eff_vol = max(v, 0.10) if (v is not None and v > 0) else 0.25
+    weight = min(float(max_pos_weight), float(target_risk) / eff_vol)
+    return max(float(equity), 0.0) * max(weight, 0.0)
+
+
 def evaluate_position(
     pos: dict,
     f: pd.DataFrame,
-    exit_mode: str = "E2",
+    exit_mode: str = "E3_atr",
     units: int = UNITS,
     sell_cost: float = 0.00215,
     hold_add_under20: bool = False,
+    atr_stop_mult: float = 2.5,
 ) -> dict:
     """보유 포지션의 당일 종가 기준 청산/물타기/보유 판정을 반환한다."""
     last = f.iloc[-1]
     held = f[f.index >= pd.Timestamp(pos["opened"])]
     since = int((f.index > pd.Timestamp(pos["last_buy"])).sum())
-    in_profit = bool(pos["qty"] > 0 and pos["qty"] * float(last["Close"]) * (1 - sell_cost) > pos["cost"])
+    close_val = float(last["Close"])
+    in_profit = bool(pos["qty"] > 0 and pos["qty"] * close_val * (1 - sell_cost) > pos["cost"])
     hit80 = bool(pos.get("hit80")) or bool((held["K"] > 80).any())
     above20 = bool(pos.get("above20")) or (
         bool((held["Close"] > held["MA20"]).any()) if "MA20" in held else False
     )
+    max_high = max(
+        float(pos.get("max_high") or 0.0),
+        float(held["High"].max()) if (len(held) and "High" in held and held["High"].notna().any()) else 0.0,
+    )
     k_down = bool(len(f) > 1 and float(last["K"]) < float(f["K"].iloc[-2]))
-    below_ma20 = bool("MA20" in f and pd.notna(last["MA20"]) and float(last["Close"]) < float(last["MA20"]))
+    below_ma20 = bool("MA20" in f and pd.notna(last["MA20"]) and close_val < float(last["MA20"]))
+
+    entry_px = float(pos.get("entry_px") or (pos["cost"] / max(pos["qty"], 1) if pos["qty"] > 0 else 0.0))
+    entry_atr = float(pos.get("entry_atr") or 0.0)
+    sma200_val = _finite(last.get("SMA200")) if "SMA200" in f else None
+    atr_now = _finite(last.get("ATR14")) if "ATR14" in f else None
+    sma5_val = _finite(last.get("SMA5")) if "SMA5" in f else None
+    prev_high = _finite(f["High"].iloc[-2]) if (len(f) > 1 and "High" in f) else None
+
+    below_sma200 = bool(sma200_val is not None and close_val < sma200_val)
+    atr_stop_hit = bool(entry_px > 0 and entry_atr > 0 and close_val < entry_px - atr_stop_mult * entry_atr)
 
     should_sell = False
     sell_sig = ""
@@ -100,12 +191,39 @@ def evaluate_position(
                 should_sell, sell_sig, sell_why = True, "매도(이익 중 20일선 이탈)", "이익 + 20일선 이탈"
         elif bool(last["SELL"]):
             should_sell, sell_sig, sell_why = True, "매도(손실 중 데드크로스)", "손실 + SELL 신호"
+    elif exit_mode == "E3_atr":
+        if in_profit:
+            if above20 and below_ma20:
+                should_sell, sell_sig, sell_why = True, "매도(이익 중 20일선 이탈)", "이익 + 20일선 이탈"
+        else:
+            if atr_stop_hit:
+                should_sell, sell_sig, sell_why = True, "매도(손실 ATR 손절)", f"손실 + -{atr_stop_mult}ATR 이탈"
+            elif below_sma200:
+                should_sell, sell_sig, sell_why = True, "매도(200일선 이탈)", "손실 + 200일선 이탈"
+            elif entry_atr <= 0 and sma200_val is None and bool(last["SELL"]):
+                should_sell, sell_sig, sell_why = True, "매도(손실 중 데드크로스)", "손실 + SELL 신호"
     elif exit_mode == "E4":
         if in_profit:
             if (hit80 or above20) and below_ma20:
                 should_sell, sell_sig, sell_why = True, "매도(80·추세 후 20일선 이탈)", "이익 + 80/20일선 후 이탈"
         elif bool(last["SELL"]):
             should_sell, sell_sig, sell_why = True, "매도(손실 중 데드크로스)", "손실 + SELL 신호"
+    elif exit_mode == "chandelier":
+        if in_profit:
+            if max_high > 0 and atr_now is not None and atr_now > 0 and close_val < max_high - atr_stop_mult * atr_now:
+                should_sell, sell_sig, sell_why = True, "매도(Chandelier ATR 이탈)", f"이익 + 고점-{atr_stop_mult}ATR 이탈"
+        else:
+            if atr_stop_hit:
+                should_sell, sell_sig, sell_why = True, "매도(손실 ATR 손절)", f"손실 + -{atr_stop_mult}ATR 이탈"
+            elif below_sma200:
+                should_sell, sell_sig, sell_why = True, "매도(200일선 이탈)", "손실 + 200일선 이탈"
+    elif exit_mode == "meanrev":
+        mr_hit = (sma5_val is not None and close_val > sma5_val) or (prev_high is not None and close_val > prev_high)
+        held_days = max(len(held) - 1, 0)
+        if mr_hit:
+            should_sell, sell_sig, sell_why = True, "매도(단기 평균회귀)", "종가 > 5일선/전일고가"
+        elif (not in_profit and held_days >= 10) or below_sma200:
+            should_sell, sell_sig, sell_why = True, "매도(타임스톱/추세이탈)", "10일 타임스톱 또는 200일선 이탈"
     else:
         raise ValueError(f"지원하지 않는 exit_mode: {exit_mode}")
 
@@ -119,6 +237,7 @@ def evaluate_position(
             "why": sell_why,
             "hit80": hit80,
             "above20": above20,
+            "max_high": max_high,
             "in_profit": in_profit,
             "status": "청산 신호",
         }
@@ -130,19 +249,28 @@ def evaluate_position(
             "why": f"ADD {pos['units'] + 1}/{units}",
             "hit80": hit80,
             "above20": above20,
+            "max_high": max_high,
             "in_profit": in_profit,
             "status": "물타기 신호",
         }
 
     if not in_profit:
-        if hold_add_under20 and float(last["K"]) < 20 and pos["units"] < units:
+        if exit_mode in ("E3_atr", "chandelier"):
+            status = "ATR/200일선 감시"
+        elif exit_mode == "meanrev":
+            status = "평균회귀 대기"
+        elif hold_add_under20 and float(last["K"]) < 20 and pos["units"] < units:
             status = "과매도 물타기 대기"
         else:
             status = "손실감시"
     elif exit_mode == "E2":
         status = "80도달·유지" if hit80 else "80도달 대기"
-    elif exit_mode in ("E3", "E4"):
+    elif exit_mode in ("E3", "E3_atr", "E4"):
         status = "20일선 추적" if (above20 or hit80) else "추세진입 대기"
+    elif exit_mode == "chandelier":
+        status = "Chandelier 추적"
+    elif exit_mode == "meanrev":
+        status = "5일선 반등 대기"
     else:
         status = "데드크로스 감시"
 
@@ -152,6 +280,7 @@ def evaluate_position(
         "why": "",
         "hit80": hit80,
         "above20": above20,
+        "max_high": max_high,
         "in_profit": in_profit,
         "status": status,
     }
@@ -165,16 +294,31 @@ def _finite(val) -> float | None:
         return None
 
 
-def rank_candidates(rows: list[dict], rank_by: str = "rs60") -> list[dict]:
-    """신규 매수 후보 정렬: 'rs60'(상대강도/60일수익률 내림차순) 또는 'k'(%K 오름차순)."""
+def rank_candidates(rows: list[dict], rank_by: str = "clenow") -> list[dict]:
+    """신규 매수 후보 정렬: 'clenow'(Clenow90 내림차순), 'rs60', 'k'(%K 오름차순)."""
     if rank_by == "k":
         return sorted(rows, key=lambda r: _finite(r.get("%K")) if _finite(r.get("%K")) is not None else 999.0)
     if rank_by == "rs60":
-        def key(r):
+        def key_rs(r):
             rs = _finite(r.get("RS60"))
             ret60 = _finite(r.get("Ret60%"))
             score = rs if rs is not None else (ret60 if ret60 is not None else -1e9)
             k_val = _finite(r.get("%K"))
             return (-score, k_val if k_val is not None else 999.0)
-        return sorted(rows, key=key)
+        return sorted(rows, key=key_rs)
+    if rank_by == "clenow":
+        def key_cl(r):
+            cl = _finite(r.get("Clenow90"))
+            rs = _finite(r.get("RS60"))
+            ret60 = _finite(r.get("Ret60%"))
+            k_val = _finite(r.get("%K"))
+            kv = k_val if k_val is not None else 999.0
+            if cl is not None:
+                return (0, -cl, kv)
+            if rs is not None:
+                return (1, -rs, kv)
+            if ret60 is not None:
+                return (2, -ret60, kv)
+            return (3, 0.0, kv)
+        return sorted(rows, key=key_cl)
     raise ValueError(f"지원하지 않는 rank_by: {rank_by}")
