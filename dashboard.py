@@ -15,8 +15,8 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).parent
-# 백테스트(2016~2026, 시총상위200 v5 E3+RS60) 기대치 — 실전 성과 비교용
-EXPECT = {"승률%": 38.1, "거래당 평균%": 1.27, "PF": 1.42, "평균 보유일": 11.1}
+# 백테스트(2016~2026, 시총상위200 v6 보수형 M2c) 기대치 — 실전 성과 비교용
+EXPECT = {"승률%": 59.9, "거래당 평균%": 2.96, "PF": 1.56, "평균 보유일": 21.2}
 
 
 def _fmt(x, nd=0):
@@ -26,8 +26,15 @@ def _fmt(x, nd=0):
         return "-"
 
 
+def _money(x, cur: str = "원", px: bool = False) -> str:
+    if cur == "$":
+        return f"${_fmt(x, 2 if px else 0)}"
+    return f"{_fmt(x)}원"
+
+
 def health(state: dict, snap: dict, today=None):
     """(등급, 항목, 내용) 목록. 등급: good / warning / critical"""
+    cur = snap.get("currency", "원")
     out = []
     if snap.get("kill"):
         out.append(("critical", "긴급 정지(KILL_SWITCH)", f"{snap['kill']} — 주문 중지 중. 확인 후 파일 삭제로 해제"))
@@ -45,7 +52,7 @@ def health(state: dict, snap: dict, today=None):
         "미체결 대기주문",
         f"{len(state.get('pending', []))}건" + (f", 3영업일 넘은 것 {len(old)}건" if old else ""),
     ))
-    out.append(("good" if state["cash"] >= 0 else "critical", "현금", f"{_fmt(state['cash'])}원"))
+    out.append(("good" if state["cash"] >= 0 else "critical", "현금", _money(state["cash"], cur)))
     err = [r for r in snap.get("rows", []) if r.get("메모")]
     out.append(("good" if not err else "warning", "종목 데이터 오류", f"{len(err)}종목"))
     expect = snap.get("expect") or EXPECT
@@ -66,10 +73,15 @@ def health(state: dict, snap: dict, today=None):
 def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -> Path:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    cur = snap.get("currency", "원")
+    bench_name = snap.get("benchmark", "KODEX 200")
+    market = snap.get("market", "KR")
     max_pos = int(snap.get("max_positions", 10))
-    units = int(snap.get("units", 3))
-    exit_mode = snap.get("exit_mode", "E3")
-    rank_by = snap.get("rank_by", "rs60")
+    units = int(snap.get("units", 1))
+    entry_mode = snap.get("entry_mode", "pullback_v6")
+    exit_mode = snap.get("exit_mode", "E3_atr")
+    rank_by = snap.get("rank_by", "clenow")
+    sizing = snap.get("sizing", "inverse_vol")
     expect = snap.get("expect") or EXPECT
 
     eq = pd.DataFrame(state.get("equity_log", []))
@@ -128,48 +140,66 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
         tb = "".join("<tr>" + "".join(f"<td>{html.escape(str(v))}</td>" for v in r) + "</tr>" for r in rows)
         return f'<div class="tw"><table><thead><tr>{th}</tr></thead><tbody>{tb}</tbody></table></div>'
 
+    nd_px = 2 if cur == "$" else 0
     row_by_code = {r["코드"]: r for r in snap.get("rows", []) if r.get("코드")}
     asof_ts = pd.Timestamp(snap["asof"])
     pos_rows = []
     for c, p in state.get("positions", {}).items():
         avg = p["cost"] / max(p["qty"], 1)
         rr = row_by_code.get(c, {})
-        cur = rr.get("종가") or p.get("last_price") or avg
+        cur_p = rr.get("종가") or p.get("last_price") or avg
         held_d = rr.get("보유일")
         if held_d is None:
             held_d = max(len(pd.bdate_range(p["opened"], asof_ts)) - 1, 0)
         kd_str = f"{rr['%K']} / {rr['%D']}" if rr.get("%K") is not None else "-"
         pos_rows.append([
-            p["name"], c, _fmt(p["qty"]), _fmt(avg), _fmt(cur), f"{100*(cur/avg-1):+.1f}%",
+            p["name"], c, _fmt(p["qty"]), _fmt(avg, nd_px), _fmt(cur_p, nd_px), f"{100*(cur_p/avg-1):+.1f}%",
             f"{p['units']}/{units}", p["opened"], f"{held_d}일", kd_str, rr.get("청산상태") or "-",
         ])
 
     sig_rows = [
-        [r["종목"], r["코드"], _fmt(r.get("종가") or 0), r.get("%K", ""), r.get("%D", ""),
-         r.get("RS60") if r.get("RS60") is not None else "-", r["신호"]]
+        [r["종목"], r["코드"], _fmt(r.get("종가") or 0, nd_px),
+         r.get("RSI2") if r.get("RSI2") is not None else r.get("%K", ""),
+         r.get("IBS") if r.get("IBS") is not None else r.get("%D", ""),
+         r.get("Clenow90") if r.get("Clenow90") is not None else (r.get("RS60") if r.get("RS60") is not None else "-"),
+         r["신호"]]
         for r in snap.get("rows", []) if r.get("신호")
     ]
 
     radar_cands = []
     for r in snap.get("rows", []):
-        k_val = r.get("%K")
-        if k_val is not None and not r.get("메모"):
-            try:
-                if float(k_val) < 30:
-                    radar_cands.append(r)
-            except (TypeError, ValueError):
-                pass
-    radar_cands.sort(key=lambda r: float(r.get("%K", 999)))
+        if r.get("메모"):
+            continue
+        k_val, rsi2_val, ibs_val = r.get("%K"), r.get("RSI2"), r.get("IBS")
+        hit = False
+        for val, thr in ((rsi2_val, 15.0), (ibs_val, 0.25), (k_val, 30.0)):
+            if val is not None:
+                try:
+                    if float(val) < thr:
+                        hit = True
+                except (TypeError, ValueError):
+                    pass
+        if hit:
+            radar_cands.append(r)
+
+    def _radar_sort_key(r):
+        if r.get("RSI2") is not None:
+            return (0, float(r["RSI2"]))
+        if r.get("%K") is not None:
+            return (1, float(r["%K"]))
+        return (2, 999.0)
+
+    radar_cands.sort(key=_radar_sort_key)
     radar_rows = [
         [
             r["종목"],
             r["코드"],
-            _fmt(r.get("종가") or 0),
-            r.get("%K", ""),
-            r.get("%D", ""),
-            "✓" if r.get("주봉OK") else "-",
-            "✓" if r.get("추세OK") else "-",
-            r.get("RS60") if r.get("RS60") is not None else "-",
+            _fmt(r.get("종가") or 0, nd_px),
+            r.get("%K", "-"),
+            r.get("RSI2") if r.get("RSI2") is not None else "-",
+            r.get("IBS") if r.get("IBS") is not None else "-",
+            "✓" if (r.get("정배열") or r.get("추세OK")) else "-",
+            r.get("Clenow90") if r.get("Clenow90") is not None else (r.get("RS60") if r.get("RS60") is not None else "-"),
             r.get("신호") or ("보유 중" if r.get("보유") else "대기"),
         ]
         for r in radar_cands[:20]
@@ -181,7 +211,7 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
             o["name"],
             o["code"],
             o["why"],
-            _fmt(o["amount"]) + "원" if o.get("amount") else "전량",
+            _money(o["amount"], cur) if o.get("amount") else "전량",
             o["created"],
         ]
         for o in state.get("pending", [])
@@ -234,11 +264,11 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 #tip{{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px #0002}}
 </style></head><body><main>
 <h1>주식 자동매매 — 모의 장부</h1>
-<p class="sub">스토캐스틱 v5 ({html.escape(exit_mode)} · {html.escape(rank_by)} · {units}분할) · 일봉 · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
+<p class="sub">v6 ({html.escape(market)} · {html.escape(entry_mode)} · {html.escape(exit_mode)} · {html.escape(rank_by)} · {html.escape(sizing)}) · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
 <div class="tiles">
-<div class="tile"><div class="k">평가자산</div><div class="v">{_fmt(equity)}원</div></div>
+<div class="tile"><div class="k">평가자산</div><div class="v">{_money(equity, cur)}</div></div>
 <div class="tile"><div class="k">누적 수익률</div><div class="v">{ret:+.2f}%</div></div>
-<div class="tile"><div class="k">같은 기간 KODEX 200</div><div class="v">{bm:+.2f}%</div></div>
+<div class="tile"><div class="k">같은 기간 {html.escape(bench_name)}</div><div class="v">{bm:+.2f}%</div></div>
 <div class="tile"><div class="k">시장 대비 초과수익</div><div class="v">{alpha:+.2f}%p</div></div>
 <div class="tile"><div class="k">현재 / 최대 낙폭</div><div class="v">{cur_dd:.1f}% / {mdd:.1f}%</div></div>
 <div class="tile"><div class="k">투자비중 (주식)</div><div class="v">{inv_pct:.1f}%</div></div>
@@ -246,13 +276,13 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 <div class="tile"><div class="k">시장 필터</div><div class="v">{'ON · 매수 가능' if snap['mkt_on'] else 'OFF · 신규매수 중지'}</div></div>
 </div>
 <h2>점검</h2><div class="card"><ul class="hl">{health_html}</ul></div>
-<h2>계좌 vs KODEX 200 (시작 = 100) · 낙폭(Drawdown)</h2>
+<h2>계좌 vs {html.escape(bench_name)} (시작 = 100) · 낙폭(Drawdown)</h2>
 <div class="card"><div class="legend"><span><i class="sw" style="background:var(--s1)"></i>모의 계좌</span>
-<span><i class="sw" style="background:var(--s2)"></i>KODEX 200</span></div><div id="chart"></div></div>
+<span><i class="sw" style="background:var(--s2)"></i>{html.escape(bench_name)}</span></div><div id="chart"></div></div>
 <h2>보유 종목</h2>{table(["종목","코드","수량","평단","현재가","손익","매수횟수","진입일","보유일","%K/%D","추적상태"], pos_rows)}
 <h2>내일 시가 주문(대기)</h2>{table(["구분","종목","코드","사유","금액","생성일"], pend_rows)}
-<h2>오늘 신호</h2>{table(["종목","코드","종가","%K","%D","RS60","신호"], sig_rows)}
-<h2>매수 임박 관심종목 (%K &lt; 30)</h2>{table(["종목","코드","종가","%K","%D","주봉OK","추세OK","RS60","상태"], radar_rows)}
+<h2>오늘 신호</h2>{table(["종목","코드","종가","RSI2/%K","IBS/%D","Clenow90","신호"], sig_rows)}
+<h2>매수 임박 관심종목 (%K &lt; 30 · RSI2 &lt; 15)</h2>{table(["종목","코드","종가","%K","RSI2","IBS","정배열","Clenow90","상태"], radar_rows)}
 <h2>실전 vs 백테스트 기대치</h2>{table(["지표","백테스트","모의 실적"], cmp_rows)}
 <h2>최근 청산 (최대 30건)</h2>{table(["종목","코드","진입","청산","매수횟수","수익률","사유"], hist_rows)}
 <h2>오늘 실행 로그</h2><div class="card">{log_html}</div>
@@ -260,6 +290,7 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 </main><div id="tip"></div>
 <script>
 const D={json.dumps(series)};
+const BM={json.dumps(bench_name)};
 (function(){{const el=document.getElementById('chart');if(D.length<2){{el.innerHTML='<p class="muted">2일 이상 쌓이면 그려집니다.</p>';return;}}
 const W=el.clientWidth||900,H1=230,GAP=26,H2=90,H=H1+GAP+H2,L=48,R=12,T=10,B=24;
 const v=D.flatMap(p=>[p.a,p.b]);let lo=Math.min(...v),hi=Math.max(...v);const pad=(hi-lo)*.08||1;lo-=pad;hi+=pad;
@@ -270,13 +301,13 @@ let g='';for(let j=0;j<=4;j++){{const t=lo+(hi-lo)*j/4;g+=`<line x1="${{L}}" x2=
 [0,dlo/2,dlo].forEach(t=>g+=`<line x1="${{L}}" x2="${{W-R}}" y1="${{y2(t)}}" y2="${{y2(t)}}" stroke="var(--line)"/><text x="${{L-6}}" y="${{y2(t)+4}}" text-anchor="end">${{t.toFixed(0)}}%</text>`);
 const n=D.length,ti=[0,Math.floor(n/2),n-1];ti.forEach(i=>g+=`<text x="${{x(i)}}" y="${{H-4}}" text-anchor="middle">${{D[i].d}}</text>`);
 const area=`M${{x(0).toFixed(1)}} ${{y2(0).toFixed(1)}} `+D.map((p,i)=>`L${{x(i).toFixed(1)}} ${{y2(p.dd).toFixed(1)}}`).join(' ')+` L${{x(n-1).toFixed(1)}} ${{y2(0).toFixed(1)}} Z`;
-el.innerHTML=`<svg width="${{W}}" height="${{H}}" role="img" aria-label="모의 계좌와 KODEX200 추이 및 낙폭">${{g}}<line x1="${{L}}" x2="${{W-R}}" y1="${{y1(100)}}" y2="${{y1(100)}}" stroke="var(--muted)" stroke-dasharray="3 3"/>
+el.innerHTML=`<svg width="${{W}}" height="${{H}}" role="img" aria-label="모의 계좌와 벤치마크 추이 및 낙폭">${{g}}<line x1="${{L}}" x2="${{W-R}}" y1="${{y1(100)}}" y2="${{y1(100)}}" stroke="var(--muted)" stroke-dasharray="3 3"/>
 <path d="${{path('b',y1)}}" fill="none" stroke="var(--s2)" stroke-width="2"/><path d="${{path('a',y1)}}" fill="none" stroke="var(--s1)" stroke-width="2"/>
 <path d="${{area}}" fill="var(--s1)" opacity="0.14"/><path d="${{path('kdd',y2)}}" fill="none" stroke="var(--s2)" stroke-width="1.2" opacity="0.7"/><path d="${{path('dd',y2)}}" fill="none" stroke="var(--s1)" stroke-width="1.6"/>
 <line id="cx" y1="${{T}}" y2="${{H-B}}" stroke="var(--muted)" visibility="hidden"/><rect x="${{L}}" y="${{T}}" width="${{W-L-R}}" height="${{H-T-B}}" fill="transparent" id="hit"/></svg>`;
 const tip=document.getElementById('tip'),cx=el.querySelector('#cx');el.querySelector('#hit').addEventListener('mousemove',e=>{{const r=e.target.getBoundingClientRect();
 const i=Math.max(0,Math.min(n-1,Math.round((e.clientX-r.left)/(r.width)*(n-1))));const p=D[i];cx.setAttribute('x1',x(i));cx.setAttribute('x2',x(i));cx.setAttribute('visibility','visible');
-tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';tip.innerHTML=`<b>${{p.d}}</b><br>모의 계좌 ${{p.a.toFixed(1)}} (DD ${{p.dd.toFixed(1)}}%)<br>KODEX 200 ${{p.b.toFixed(1)}} (DD ${{p.kdd.toFixed(1)}}%)`;}});
+tip.style.display='block';tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY+12)+'px';tip.innerHTML=`<b>${{p.d}}</b><br>모의 계좌 ${{p.a.toFixed(1)}} (DD ${{p.dd.toFixed(1)}}%)<br>${{BM}} ${{p.b.toFixed(1)}} (DD ${{p.kdd.toFixed(1)}}%)`;}});
 el.querySelector('#hit').addEventListener('mouseleave',()=>{{tip.style.display='none';cx.setAttribute('visibility','hidden');}});}})();
 </script></body></html>"""
     (out_dir / "index.html").write_text(page, encoding="utf-8")
@@ -284,8 +315,9 @@ el.querySelector('#hit').addEventListener('mouseleave',()=>{{tip.style.display='
 
 
 if __name__ == "__main__":
-    import FinanceDataReader as fdr
-    st = json.loads((HERE / "state" / "paper.json").read_text(encoding="utf-8"))
-    sn = json.loads((HERE / "state" / "paper_snapshot.json").read_text(encoding="utf-8"))
-    k = fdr.DataReader("069500", (dt.date.today() - dt.timedelta(days=800)).isoformat())["Close"]
-    print(build(st, sn, k, HERE / "dashboard"))
+    import market_data
+
+    st_data = json.loads((HERE / "state" / "paper.json").read_text(encoding="utf-8"))
+    sn_data = json.loads((HERE / "state" / "paper_snapshot.json").read_text(encoding="utf-8"))
+    k = market_data.load_prices("069500", days=600)["Close"]
+    print(build(st_data, sn_data, k, HERE / "dashboard"))

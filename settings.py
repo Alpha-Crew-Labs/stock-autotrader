@@ -15,8 +15,11 @@ from pathlib import Path
 HERE = Path(__file__).parent
 KILL = HERE / "KILL_SWITCH"
 MODES = ("paper", "mock", "live")
-VALID_EXIT_MODES = ("E0", "E2", "E3", "E4")
-VALID_RANK_BY = ("k", "rs60")
+VALID_MARKETS = ("KR", "US")
+VALID_ENTRY_MODES = ("pullback_v6", "stoch_v5")
+VALID_EXIT_MODES = ("E0", "E2", "E3", "E3_atr", "E4", "chandelier", "meanrev")
+VALID_RANK_BY = ("clenow", "rs60", "k")
+VALID_SIZING = ("inverse_vol", "equal")
 
 DEFAULTS = {
     "mode": "paper",
@@ -32,8 +35,14 @@ DEFAULTS = {
         "buy_price_buffer_pct": 0.003,
     },
     "strategy": {
-        "exit_mode": "E3",
-        "rank_by": "rs60",
+        "market": "KR",
+        "entry_mode": "pullback_v6",
+        "exit_mode": "E3_atr",
+        "rank_by": "clenow",
+        "sizing": "inverse_vol",
+        "target_risk": 0.016,
+        "max_pos_weight": 0.10,
+        "atr_stop_mult": 2.5,
         "max_pending_age_bdays": 3,
         "hold_add_under20": False,
     },
@@ -53,10 +62,18 @@ def load(path: Path = HERE / "config.json") -> dict:
                 cfg[k] = v
     if cfg["mode"] not in MODES:
         raise ValueError(f"config.json mode 는 {MODES} 중 하나여야 합니다: {cfg['mode']}")
-    if cfg["strategy"]["exit_mode"] not in VALID_EXIT_MODES:
-        raise ValueError(f"strategy.exit_mode 는 {VALID_EXIT_MODES} 중 하나여야 합니다: {cfg['strategy']['exit_mode']}")
-    if cfg["strategy"]["rank_by"] not in VALID_RANK_BY:
-        raise ValueError(f"strategy.rank_by 는 {VALID_RANK_BY} 중 하나여야 합니다: {cfg['strategy']['rank_by']}")
+    st = cfg["strategy"]
+    st["market"] = str(st.get("market", "KR")).upper()
+    if st["market"] not in VALID_MARKETS:
+        raise ValueError(f"strategy.market 는 {VALID_MARKETS} 중 하나여야 합니다: {st['market']}")
+    if st["entry_mode"] not in VALID_ENTRY_MODES:
+        raise ValueError(f"strategy.entry_mode 는 {VALID_ENTRY_MODES} 중 하나여야 합니다: {st['entry_mode']}")
+    if st["exit_mode"] not in VALID_EXIT_MODES:
+        raise ValueError(f"strategy.exit_mode 는 {VALID_EXIT_MODES} 중 하나여야 합니다: {st['exit_mode']}")
+    if st["rank_by"] not in VALID_RANK_BY:
+        raise ValueError(f"strategy.rank_by 는 {VALID_RANK_BY} 중 하나여야 합니다: {st['rank_by']}")
+    if st["sizing"] not in VALID_SIZING:
+        raise ValueError(f"strategy.sizing 는 {VALID_SIZING} 중 하나여야 합니다: {st['sizing']}")
     return cfg
 
 

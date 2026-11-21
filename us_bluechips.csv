@@ -1,0 +1,66 @@
+Code,Name,Sector
+AAPL,Apple,Tech/Comm
+MSFT,Microsoft,Tech/Comm
+NVDA,NVIDIA,Tech/Comm
+AMZN,Amazon,Tech/Comm
+GOOGL,Alphabet,Tech/Comm
+META,Meta Platforms,Tech/Comm
+AVGO,Broadcom,Tech/Comm
+ORCL,Oracle,Tech/Comm
+CRM,Salesforce,Tech/Comm
+ADBE,Adobe,Tech/Comm
+QCOM,Qualcomm,Tech/Comm
+TXN,Texas Instruments,Tech/Comm
+AMD,AMD,Tech/Comm
+INTC,Intel,Tech/Comm
+NFLX,Netflix,Tech/Comm
+DIS,Walt Disney,Tech/Comm
+LLY,Eli Lilly,Healthcare
+UNH,UnitedHealth,Healthcare
+JNJ,Johnson & Johnson,Healthcare
+ABBV,AbbVie,Healthcare
+MRK,Merck,Healthcare
+TMO,Thermo Fisher,Healthcare
+ABT,Abbott Labs,Healthcare
+PFE,Pfizer,Healthcare
+BMY,Bristol Myers Squibb,Healthcare
+JPM,JPMorgan Chase,Financials
+BAC,Bank of America,Financials
+WFC,Wells Fargo,Financials
+GS,Goldman Sachs,Financials
+MS,Morgan Stanley,Financials
+BLK,BlackRock,Financials
+V,Visa,Financials
+MA,Mastercard,Financials
+AXP,American Express,Financials
+WMT,Walmart,Consumer
+COST,Costco,Consumer
+HD,Home Depot,Consumer
+PG,Procter & Gamble,Consumer
+KO,Coca-Cola,Consumer
+PEP,PepsiCo,Consumer
+MCD,McDonald's,Consumer
+SBUX,Starbucks,Consumer
+NKE,Nike,Consumer
+LOW,Lowe's,Consumer
+TGT,Target,Consumer
+XOM,Exxon Mobil,Industrials/Energy
+CVX,Chevron,Industrials/Energy
+COP,ConocoPhillips,Industrials/Energy
+CAT,Caterpillar,Industrials/Energy
+HON,Honeywell,Industrials/Energy
+GE,GE Aerospace,Industrials/Energy
+UNP,Union Pacific,Industrials/Energy
+UPS,UPS,Industrials/Energy
+RTX,RTX,Industrials/Energy
+LMT,Lockheed Martin,Industrials/Energy
+BA,Boeing,Industrials/Energy
+LIN,Linde,Industrials/Energy
+NEE,NextEra Energy,Utilities/REIT/Other
+DUK,Duke Energy,Utilities/REIT/Other
+AMT,American Tower,Utilities/REIT/Other
+PLD,Prologis,Utilities/REIT/Other
+VZ,Verizon,Utilities/REIT/Other
+T,AT&T,Utilities/REIT/Other
+CVS,CVS Health,Utilities/REIT/Other
+PYPL,PayPal,Utilities/REIT/Other

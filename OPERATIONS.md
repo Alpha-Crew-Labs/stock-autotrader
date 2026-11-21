@@ -1,6 +1,6 @@
 # 실전 운영 가이드
 
-> 모의 장부(paper) → 키움 모의투자(mock) → 실전(live) 순서로만 올라간다. 단계를 건너뛰지 않는다.
+> 모의 장부(paper) → 키움 모의투자(mock, KR 전용) → 실전(live, KR 전용) 순서로만 올라간다. 단계를 건너뛰지 않는다.
 
 ## 0. 처음 설치 (한 번)
 
@@ -8,16 +8,16 @@
 git clone https://github.com/Alpha-Crew-Labs/stock-autotrader.git
 cd stock-autotrader
 pip install -r requirements.txt
-python -m pytest -q          # 전부 통과해야 정상
+python -m pytest -q          # 152건 전부 통과해야 정상
 ```
 `config.local.json` 만들기 (이 파일은 GitHub에 안 올라감):
 ```json
 {
-  "dart_api_key": "OpenDART 키 (스크리너의 전환사채 제외용, opendart.fss.or.kr 무료)",
-  "kiwoom_mock_appkey": "모의투자 앱키",
-  "kiwoom_mock_secretkey": "모의투자 시크릿",
-  "kiwoom_appkey": "실전 앱키 (실전 단계에서만)",
-  "kiwoom_secretkey": "실전 시크릿 (실전 단계에서만)",
+  "dart_api_key": "OpenDART 키 (KR 스크리너의 전환사채 제외용, opendart.fss.or.kr 무료)",
+  "kiwoom_mock_appkey": "모의투자 앱키 (KR 전용)",
+  "kiwoom_mock_secretkey": "모의투자 시크릿 (KR 전용)",
+  "kiwoom_appkey": "실전 앱키 (KR 실전 단계에서만)",
+  "kiwoom_secretkey": "실전 시크릿 (KR 실전 단계에서만)",
   "telegram_bot_token": "(선택) 텔레그램 봇 토큰",
   "telegram_chat_id": "(선택) 텔레그램 채팅 ID"
 }
@@ -28,9 +28,11 @@ python -m pytest -q          # 전부 통과해야 정상
 
 | 단계 | config.json `mode` | 무엇이 일어나나 | 다음 단계로 가는 기준 |
 |---|---|---|---|
-| ① 모의 장부 | `paper` | 신호대로 장부에만 기록 (돈·주문 없음) | 3개월 이상, 청산 20건 이상, 수익팩터 ≥ 1.0 |
-| ② 키움 모의투자 | `mock` | 키움 **모의 서버**로 진짜 주문 → 잔고로 장부를 맞춤 | 1개월 이상 주문·체결·장부가 어긋나지 않음 |
-| ③ 실전 | `live` | 실제 계좌로 주문 | — |
+| ① 모의 장부 | `paper` | KR · US 모두 신호대로 장부에만 기록 (돈·주문 없음) | 3개월 이상, 청산 20건 이상, 수익팩터 ≥ 1.0 |
+| ② 키움 모의투자 | `mock` | KR 전용 키움 **모의 서버**로 진짜 주문 → 잔고로 장부를 맞춤 | 1개월 이상 주문·체결·장부가 어긋나지 않음 |
+| ③ 실전 | `live` | KR 실제 계좌로 주문 | — |
+
+> 💡 미국 시장(`--market US`)은 현재 **`paper` 모의 장부 및 백테스트/리플레이 연구 전용**이다. 키움 자동 전송(`run_orders.py`)은 KR 주문만 처리한다.
 
 실전 켜기 (이중 잠금):
 1. `config.json` → `"mode": "live"`, `"live": {"enabled": true}`
@@ -41,13 +43,14 @@ python -m pytest -q          # 전부 통과해야 정상
 
 | 시각 (평일) | 실행 | 하는 일 |
 |---|---|---|
-| 08:40 | `run_orders.cmd` / `run_orders.sh` | 어제 만든 대기주문을 시장가로 전송 (장전 동시호가 → 시가 체결). paper면 아무것도 안 함 |
-| 16:10 | `run_daily.cmd` / `run_daily.sh` | 스크리너 → 잔고/체결 반영 → 신호 → 내일 주문 → 리포트·대시보드 |
+| 08:40 | `run_orders.cmd` / `run_orders.sh` | 어제 만든 KR 대기주문을 시장가로 전송 (장전 동시호가 → 시가 체결). paper면 아무것도 안 함 |
+| 16:10 | `run_daily.cmd` / `run_daily.sh` | KR 스크리너 → 잔고/체결 반영 → v6 신호 → 내일 주문 → 리포트·대시보드 |
+| (선택) 미국 마감 후 | `python run_daily.py --market US` | `us_bluechips.csv` 65종목 `yfinance` 시세로 US 모의 장부(`state/paper_us.json`, `dashboard_us/`) 갱신 |
 
 - PC가 그 시각에 **켜져 있고 절전이 아니어야** 한다
-- 상태 진단: `python run_daily.py --check` (상태·파일을 건드리지 않고 설정·키 존재 여부·KILL_SWITCH·최신성만 점검)
-- 기록: `logs/run.log`, `logs/orders.log`, `state/orders_날짜.json`, `reports/daily_날짜.md`
-- 확인: `dashboard/index.html` (점검 항목이 전부 초록이면 정상)
+- 상태 진단: `python run_daily.py --check` 및 `python run_daily.py --market US --check` (파일 변경 없이 설정·키·`KILL_SWITCH`·최신성만 점검)
+- 기록: KR(`state/paper.json`, `reports/daily_날짜.md`, `dashboard/`) · US(`state/paper_us.json`, `reports_us/daily_날짜.md`, `dashboard_us/`) · 주문(`logs/run.log`, `logs/orders.log`, `state/orders_날짜.json`)
+- 확인: `dashboard/index.html` 또는 `dashboard_us/index.html`
 
 ## 3. 안전장치
 
@@ -58,6 +61,7 @@ python -m pytest -q          # 전부 통과해야 정상
 | 1건 상한 | 주문 1건 금액 상한 | `limits.max_order_krw` |
 | 하루 매수 상한 | 하루 매수 합계 상한 | `limits.max_daily_buy_krw` |
 | 손실 한도 | 하루 -3% 또는 고점 대비 -15% → `KILL_SWITCH` 자동 생성 → 다음 날부터 주문 중지 | `limits.daily_loss_stop_pct`, `max_drawdown_stop_pct` |
+| ATR/200일선 손절 | v6(`E3_atr`)에서 손실 중 종목이 진입가 `-2.5*ATR14` 또는 `SMA200` 이탈 시 자동 매도 | `strategy.atr_stop_mult`, `exit_mode` |
 | 긴급 정지 | 폴더에 `KILL_SWITCH` 파일이 있으면 주문 0건. **사람이 직접 만들어도 됨** | 지우면 해제 |
 | 중복 방지 | 같은 날 두 번 실행해도 `run_daily.py` 대기주문 및 `run_orders.py` 주문은 1회만 생성·전송 | `state/orders_날짜.json` |
 | 만료 주문 차단 | `created` 기준 3영업일 초과 미체결 **매수** 대기주문은 아침 전송에서 자동 제외(매도는 유지) | `strategy.max_pending_age_bdays` |
@@ -79,5 +83,6 @@ python -m pytest -q          # 전부 통과해야 정상
 
 ## 5. 주의
 - 직장에 임직원 개인 매매 규정(신고 계좌, 매매 보고 등)이 있으면 실전 전에 확인
-- 백테스트는 생존 편향이 있다. 실전 성과는 모의 단계에서 확인된 숫자를 기준으로 기대한다
+- 백테스트는 생존 편향(현재 대형주/우량주 기준)이 있다. 실전 성과는 모의 단계에서 확인된 숫자를 기준으로 기대한다
+- 미국 주식 실전 확장 시에는 환전·해외주식 양도세·시간차 체결 규칙을 별도 검토한다
 - 투자 판단과 책임은 사람에게 있다
