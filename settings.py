@@ -16,7 +16,7 @@ HERE = Path(__file__).parent
 KILL = HERE / "KILL_SWITCH"
 MODES = ("paper", "mock", "live")
 VALID_MARKETS = ("KR", "US")
-VALID_ENTRY_MODES = ("pullback_v7", "pullback_v6", "stoch_v5")
+VALID_ENTRY_MODES = ("pullback_v8", "pullback_v7", "pullback_v6", "stoch_v5")
 VALID_EXIT_MODES = ("E0", "E2", "E3", "E3_atr", "E4", "chandelier", "meanrev")
 VALID_RANK_BY = ("clenow", "rs60", "k")
 VALID_SIZING = ("inverse_vol", "equal")
@@ -46,6 +46,13 @@ DEFAULTS = {
         "target_mkt_vol": 0.16,
         "vol_scale_min": 0.35,
         "vol_scale_max": 1.25,
+        "vol_ratio_brake": 1.50,
+        "yellow_light_mult": 0.50,
+        "cash_park": True,
+        "cash_park_etf_kr": "153130",
+        "cash_park_etf_us": "BIL",
+        "cash_park_buffer_pct": 0.02,
+        "cash_park_deadband_pct": 0.05,
         "atr_stop_mult": 2.5,
         "max_pending_age_bdays": 3,
         "hold_add_under20": False,
@@ -85,6 +92,16 @@ def load(path: Path = HERE / "config.json") -> dict:
         raise ValueError(f"strategy.target_mkt_vol 는 0보다 커야 합니다: {tmv}")
     if not (0 < vmin <= vmax <= 2.0):
         raise ValueError(f"strategy.vol_scale_min/max 범위 오류: {vmin}, {vmax}")
+    vrb = st.get("vol_ratio_brake", 1.50)
+    if vrb is not None and float(vrb) <= 0:
+        raise ValueError(f"strategy.vol_ratio_brake 는 0보다 커야 합니다: {vrb}")
+    ylm = float(st.get("yellow_light_mult", 0.50))
+    if not (0 < ylm <= 1.0):
+        raise ValueError(f"strategy.yellow_light_mult 범위 오류(0~1]: {ylm}")
+    cp_buf = float(st.get("cash_park_buffer_pct", 0.02))
+    cp_db = float(st.get("cash_park_deadband_pct", 0.05))
+    if not (0 <= cp_buf < 0.5) or not (0 <= cp_db < 0.5):
+        raise ValueError(f"strategy.cash_park_buffer_pct/deadband_pct 범위 오류: {cp_buf}, {cp_db}")
     return cfg
 
 

@@ -24,6 +24,13 @@
     "target_mkt_vol": 0.16,
     "vol_scale_min": 0.35,
     "vol_scale_max": 1.25,
+    "vol_ratio_brake": 1.50,
+    "yellow_light_mult": 0.50,
+    "cash_park": true,
+    "cash_park_etf_kr": "153130",
+    "cash_park_etf_us": "BIL",
+    "cash_park_buffer_pct": 0.02,
+    "cash_park_deadband_pct": 0.05,
     "atr_stop_mult": 2.5,
     "max_pending_age_bdays": 3,
     "hold_add_under20": false

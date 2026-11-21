@@ -1,18 +1,18 @@
-r"""매일 장 마감 후 실행(16:10~): v7 멀티마켓(KR·US) 신호 -> 장부 갱신 -> 내일 아침 주문(대기) 생성
+r"""매일 장 마감 후 실행(16:10~): v8 멀티마켓(KR·US) 신호 -> 단기채 현금파킹/장부 갱신 -> 내일 아침 주문(대기) 생성
 
 모드(config.json mode): paper = 모의 장부 시가 체결 / mock·live = 증권사 잔고 맞춤(reconcile, 읽기 전용)
 아침 주문 전송은 run_orders.py. 손실 한도 초과 시 KILL_SWITCH 자동 생성(mock·live).
 
-흐름 (v7 기본값: pullback_v7 + E3_atr + clenow + inverse_vol + vol_targeting)
- 1) 지난 실행에서 만든 '대기 주문'을 오늘 시가로 체결 처리 (모의 장부)
- 2) 관심종목 + 보유종목의 일봉으로 신호 계산 (strategy.py 단일 진실 공급원)
-    - 신규 매수(v7): 정배열(Close>SMA200 & SMA50>SMA200) + (StochRSI<15 | (IBS<0.20 & Close<SMA5)) & ~VOL_SPIKE_DN
-      * config.json 에서 entry_mode='pullback_v6' 또는 'stoch_v5' 전환 가능
-    - 후보 순위(v7): Clenow90(90일 회귀추세*R^2) 높은 순
-    - 포지션 사이징(v7): 역변동성(target_risk=0.018 * vol_scale, 단건 상한 11%) + 시장 변동성 타게팅(목표 16%, 배율 0.35~1.25)
-    - 매도(v7 E3_atr): 이익 중 20일선 이탈 / 손실 중 -2.5*ATR14 또는 200일선 이탈
- 3) 내일 시가에 낼 대기 주문 생성(같은 날 재실행 중복 방지) -> 원자적 저장
- 4) 리포트 + dashboard/index.html (+ 선택적 Telegram 요약)
+흐름 (v8 최종본: v7 신호 + VolRatio 크래시 브레이크 + 노란불 0.5x + 단기채 현금파킹)
+ 1) 지난 실행에서 만든 '대기 주문'을 오늘 시가로 체결 처리 (모의 장부, 필요 시 단기채 ETF 선매도 후 유휴현금 재파킹)
+ 2) 시장 레짐 판정 (`strategy.market_regime`): 200일선, 50일선 노란불(0.5x), Vol20/Vol60>1.50 브레이크, 변동성 타게팅(0.35~1.25x)
+ 3) 관심종목 + 보유종목의 일봉으로 신호 계산 (`strategy.py` 단일 진실 공급원)
+    - 신규 매수(v7/v8): 정배열(Close>SMA200 & SMA50>SMA200) + (StochRSI<15 | (IBS<0.20 & Close<SMA5)) & ~VOL_SPIKE_DN
+    - 후보 순위: Clenow90(90일 회귀추세*R^2) 높은 순
+    - 포지션 사이징: 역변동성(target_risk=0.018 * regime_scale, 단건 상한 11%)
+    - 매도(E3_atr): 이익 중 20일선 이탈 / 손실 중 -2.5*ATR14 또는 200일선 이탈
+ 4) 내일 시가에 낼 대기 주문 생성(같은 날 재실행 중복 방지) -> 원자적 저장
+ 5) 리포트 + dashboard/index.html (+ 선택적 Telegram 요약)
 
 실행: python run_daily.py [--market KR|US] [--top N] [--capital 금액] [--check] [--no-notify]
 """
@@ -43,14 +43,32 @@ BUY_COST, SELL_COST = 0.00015, 0.00015 + 0.0020   # KR 실매매 기본 비용(�
 _ACTIVE_MARKET = CFG["strategy"].get("market", "KR")
 
 MARKET_CFG = {
-    "KR": {"bench": "069500", "bench_name": "KODEX 200", "buy_cost": 0.00015, "sell_cost": 0.00215, "currency": "원", "capital": 10_000_000},
-    "US": {"bench": "SPY", "bench_name": "SPY", "buy_cost": 0.0005, "sell_cost": 0.0005, "currency": "$", "capital": 100_000},
+    "KR": {
+        "bench": "069500",
+        "bench_name": "KODEX 200",
+        "buy_cost": 0.00015,
+        "sell_cost": 0.00215,
+        "currency": "원",
+        "capital": 10_000_000,
+        "cash_park_etf": "153130",
+        "etf_cost": 0.0005,
+    },
+    "US": {
+        "bench": "SPY",
+        "bench_name": "SPY",
+        "buy_cost": 0.0005,
+        "sell_cost": 0.0005,
+        "currency": "$",
+        "capital": 100_000,
+        "cash_park_etf": "BIL",
+        "etf_cost": 0.0005,
+    },
 }
 
-# 시장·전략별 백테스트 기대치 (universe200 / US 우량주 65, 2016~2026)
+# 시장·전략별 백테스트 기대치 (universe200 / US 우량주 65, 2016~2026 v8 기준)
 EXPECT_BY_MODE = {
-    ("KR", "E3_atr"): {"승률%": 62.2, "거래당 평균%": 3.92, "PF": 1.72, "평균 보유일": 22.6},
-    ("US", "E3_atr"): {"승률%": 62.4, "거래당 평균%": 1.47, "PF": 1.68, "평균 보유일": 19.0},
+    ("KR", "E3_atr"): {"승률%": 62.5, "거래당 평균%": 3.88, "PF": 1.72, "평균 보유일": 22.6},
+    ("US", "E3_atr"): {"승률%": 62.9, "거래당 평균%": 1.61, "PF": 1.77, "평균 보유일": 19.2},
     ("KR", "E3"): {"승률%": 38.1, "거래당 평균%": 1.27, "PF": 1.42, "평균 보유일": 11.1},
     ("US", "E3"): {"승률%": 42.1, "거래당 평균%": 0.18, "PF": 1.11, "평균 보유일": 11.0},
     ("KR", "E2"): {"승률%": 30.5, "거래당 평균%": 0.28, "PF": 1.08, "평균 보유일": 11.5},
@@ -94,16 +112,83 @@ def prices(code: str, days: int = 420) -> pd.DataFrame:
     return market_data.load_prices(code, days=days)
 
 
+def _open_on_or_before(df: pd.DataFrame | None, day: pd.Timestamp) -> float | None:
+    if df is None or df.empty:
+        return None
+    sub = df[df.index <= day]
+    if sub.empty:
+        return None
+    op = float(sub["Open"].iloc[-1])
+    return op if (math.isfinite(op) and op > 0) else None
+
+
+def rebalance_cash_park_open(
+    s: dict,
+    cp_code: str,
+    cp_open: float,
+    prev_equity: float,
+    buffer_pct: float,
+    deadband_pct: float,
+    etf_cost: float,
+    day_str: str,
+    log: list[str],
+    need_cash: float = 0.0,
+) -> None:
+    """유휴현금 단기채 ETF(153130/BIL)를 시가 기준으로 인출 또는 재파킹한다(positions와 분리)."""
+    cp = s.setdefault("cash_park", {"code": cp_code, "qty": 0, "cost": 0.0, "last_price": 0.0, "trades": 0})
+    if int(cp.get("qty") or 0) == 0:
+        cp["code"] = cp_code
+    if not (math.isfinite(cp_open) and cp_open > 0):
+        return
+    eq_base = max(float(prev_equity), float(s.get("cash", 0.0)), 1.0)
+
+    if need_cash > s["cash"] and int(cp.get("qty") or 0) > 0:
+        shortfall = float(need_cash) - float(s["cash"])
+        per_sh_net = float(cp_open) * (1.0 - float(etf_cost))
+        if per_sh_net > 0:
+            sell_qty = min(int(cp["qty"]), math.ceil(shortfall / per_sh_net))
+            if sell_qty > 0:
+                avg_cost = float(cp["cost"]) / int(cp["qty"]) if int(cp["qty"]) > 0 else 0.0
+                proceeds = sell_qty * per_sh_net
+                cp["qty"] = int(cp["qty"]) - sell_qty
+                cp["cost"] = max(0.0, float(cp["cost"]) - avg_cost * sell_qty) if cp["qty"] > 0 else 0.0
+                cp["last_price"] = float(cp_open)
+                cp["trades"] = int(cp.get("trades") or 0) + 1
+                s["cash"] = float(s["cash"]) + proceeds
+                log.append(f"- 현금파킹 매도 {day_str} {cp['code']} {sell_qty}주 @{cp_open:,.2f} (매수 자금 확보)")
+        return
+
+    if need_cash > 0:
+        return
+
+    excess = float(s["cash"]) - float(buffer_pct) * eq_base
+    if excess > float(deadband_pct) * eq_base:
+        per_sh_gross = float(cp_open) * (1.0 + float(etf_cost))
+        buy_qty = math.floor(excess / per_sh_gross) if per_sh_gross > 0 else 0
+        while buy_qty > 0 and buy_qty * per_sh_gross > float(s["cash"]):
+            buy_qty -= 1
+        if buy_qty > 0:
+            spent = buy_qty * per_sh_gross
+            s["cash"] = float(s["cash"]) - spent
+            cp["qty"] = int(cp.get("qty") or 0) + buy_qty
+            cp["cost"] = float(cp.get("cost") or 0.0) + spent
+            cp["last_price"] = float(cp_open)
+            cp["trades"] = int(cp.get("trades") or 0) + 1
+            log.append(f"- 현금파킹 매수 {day_str} {cp['code']} {buy_qty}주 @{cp_open:,.2f} (유휴현금 파킹)")
+
+
 def fill_pending(
     s: dict,
     px_cache: dict,
     log: list[str],
     buy_cost: float | None = None,
     sell_cost: float | None = None,
+    cash_park_cfg: dict | None = None,
+    asof: pd.Timestamp | None = None,
 ) -> None:
     bc = BUY_COST if buy_cost is None else buy_cost
     sc = SELL_COST if sell_cost is None else sell_cost
-    keep = []
+    keep, exec_sells, exec_buys = [], [], []
     for o in s["pending"]:
         df = px_cache.get(o["code"])
         if df is None:
@@ -116,35 +201,14 @@ def fill_pending(
             keep.append(o)
             continue
         day, op = after.index[0], float(after["Open"].iloc[0])
-        pos = s["positions"].get(o["code"])
         if o["side"] == "buy":
-            qty = math.floor(o["amount"] / (op * (1 + bc)))
-            if qty <= 0 or qty * op * (1 + bc) > s["cash"]:
-                log.append(f"- 체결 실패(현금/수량 부족): {o['name']} {o['why']}")
-                continue
-            cost = qty * op * (1 + bc)
-            s["cash"] -= cost
-            if pos is None:
-                pos = s["positions"][o["code"]] = {
-                    "name": o["name"],
-                    "qty": 0,
-                    "cost": 0.0,
-                    "units": 0,
-                    "unit_amt": o["amount"],
-                    "opened": str(day.date()),
-                    "hit80": False,
-                    "above20": False,
-                    "entry_px": op,
-                    "entry_atr": float(o.get("entry_atr") or 0.0),
-                    "max_high": op,
-                }
-            pos["qty"] += qty
-            pos["cost"] += cost
-            pos["units"] += 1
-            pos["last_buy"] = str(day.date())
-            pos["last_price"] = op
-            log.append(f"- 매수 체결 {day.date()} {o['name']} {qty}주 @{op:,.2f} ({o['why']})")
-        elif pos:
+            exec_buys.append((day, op, o))
+        else:
+            exec_sells.append((day, op, o))
+
+    for day, op, o in exec_sells:
+        pos = s["positions"].get(o["code"])
+        if pos:
             proceeds = pos["qty"] * op * (1 - sc)
             s["cash"] += proceeds
             r = (proceeds / pos["cost"] - 1) if pos["cost"] > 0 else 0.0
@@ -159,7 +223,75 @@ def fill_pending(
             })
             del s["positions"][o["code"]]
             log.append(f"- 매도 체결 {day.date()} {o['name']} @{op:,.2f} 수익률 {100*r:+.2f}%")
+
+    if exec_buys and cash_park_cfg and cash_park_cfg.get("enabled"):
+        need_cash = sum(
+            math.floor(o["amount"] / (op * (1 + bc))) * op * (1 + bc)
+            for _, op, o in exec_buys
+            if op > 0
+        )
+        if need_cash > s["cash"]:
+            cp_op = _open_on_or_before(cash_park_cfg.get("df"), exec_buys[0][0])
+            if cp_op is not None:
+                rebalance_cash_park_open(
+                    s,
+                    cash_park_cfg["code"],
+                    cp_op,
+                    cash_park_cfg["prev_equity"],
+                    cash_park_cfg["buffer_pct"],
+                    cash_park_cfg["deadband_pct"],
+                    cash_park_cfg["etf_cost"],
+                    str(exec_buys[0][0].date()),
+                    log,
+                    need_cash=need_cash,
+                )
+
+    for day, op, o in exec_buys:
+        pos = s["positions"].get(o["code"])
+        qty = math.floor(o["amount"] / (op * (1 + bc)))
+        if qty <= 0 or qty * op * (1 + bc) > s["cash"]:
+            log.append(f"- 체결 실패(현금/수량 부족): {o['name']} {o['why']}")
+            continue
+        cost = qty * op * (1 + bc)
+        s["cash"] -= cost
+        if pos is None:
+            pos = s["positions"][o["code"]] = {
+                "name": o["name"],
+                "qty": 0,
+                "cost": 0.0,
+                "units": 0,
+                "unit_amt": o["amount"],
+                "opened": str(day.date()),
+                "hit80": False,
+                "above20": False,
+                "entry_px": op,
+                "entry_atr": float(o.get("entry_atr") or 0.0),
+                "max_high": op,
+            }
+        pos["qty"] += qty
+        pos["cost"] += cost
+        pos["units"] += 1
+        pos["last_buy"] = str(day.date())
+        pos["last_price"] = op
+        log.append(f"- 매수 체결 {day.date()} {o['name']} {qty}주 @{op:,.2f} ({o['why']})")
+
     s["pending"] = keep
+
+    if cash_park_cfg and cash_park_cfg.get("enabled") and asof is not None:
+        cp_op = _open_on_or_before(cash_park_cfg.get("df"), asof)
+        if cp_op is not None:
+            rebalance_cash_park_open(
+                s,
+                cash_park_cfg["code"],
+                cp_op,
+                cash_park_cfg["prev_equity"],
+                cash_park_cfg["buffer_pct"],
+                cash_park_cfg["deadband_pct"],
+                cash_park_cfg["etf_cost"],
+                str(asof.date()),
+                log,
+                need_cash=0.0,
+            )
 
 
 def reconcile(
@@ -244,10 +376,12 @@ def run_check(cfg: dict, market: str = "KR") -> int:
     state_path = (HERE / "state" / "paper_us.json") if (market == "US" and STATE == HERE / "state" / "paper.json") else STATE
     print("=== 주식 자동매매 상태 점검 (--check) ===")
     print(f"- 시장/모드: {market} / {cfg['mode']} (live.enabled={bool(cfg['live'].get('enabled'))})")
-    print(f"- 전략(v7): entry={strat['entry_mode']}, exit={strat['exit_mode']}, rank={strat['rank_by']}, "
+    cp_code = strat.get("cash_park_etf_us" if market == "US" else "cash_park_etf_kr") or MARKET_CFG[market]["cash_park_etf"]
+    print(f"- 전략(v8): entry={strat['entry_mode']}, exit={strat['exit_mode']}, rank={strat['rank_by']}, "
           f"sizing={strat['sizing']}(risk={strat['target_risk']}, cap={strat['max_pos_weight']}), "
           f"vol_target={strat.get('vol_targeting', True)}({strat.get('target_mkt_vol', 0.16)}, {strat.get('vol_scale_min', 0.35)}~{strat.get('vol_scale_max', 1.25)}), "
-          f"units={cfg['units']}, max_pos={cfg['max_positions']}")
+          f"vol_ratio_brake={strat.get('vol_ratio_brake', 1.50)}, yellow={strat.get('yellow_light_mult', 0.50)}, "
+          f"cash_park={strat.get('cash_park', True)}({cp_code}), units={cfg['units']}, max_pos={cfg['max_positions']}")
     print(f"- 키 설정(존재 여부): dart_api_key={bool(local_cfg.get('dart_api_key'))}, "
           f"kiwoom_mock={bool(local_cfg.get('kiwoom_mock_appkey'))}, "
           f"kiwoom_live={bool(local_cfg.get('kiwoom_appkey'))}, "
@@ -313,22 +447,74 @@ def main():
     vol_scale_max = float(strat.get("vol_scale_max", 1.25))
     atr_stop_mult = float(strat.get("atr_stop_mult", 2.5))
     hold_add = bool(strat.get("hold_add_under20", False))
-    eval_units = 1 if (entry_mode in ("pullback_v7", "pullback_v6") or sizing == "inverse_vol") else units
+    vol_ratio_brake = strat.get("vol_ratio_brake", 1.50)
+    vol_ratio_brake = float(vol_ratio_brake) if vol_ratio_brake is not None else None
+    yellow_light_mult = float(strat.get("yellow_light_mult", 0.50))
+    cash_park_enabled = bool(strat.get("cash_park", True))
+    cp_code = str(strat.get("cash_park_etf_us" if market == "US" else "cash_park_etf_kr") or m_info["cash_park_etf"]).strip()
+    cp_buf = float(strat.get("cash_park_buffer_pct", 0.02))
+    cp_db = float(strat.get("cash_park_deadband_pct", 0.05))
+    etf_cost = float(m_info.get("etf_cost", 0.0005))
+    eval_units = 1 if (entry_mode in ("pullback_v8", "pullback_v7", "pullback_v6") or sizing == "inverse_vol") else units
 
     s = load_state(cap0, path=state_path)
     wl = load_watchlist(a.top)
     px, log = {}, []
     bench_df = prices(m_info["bench"])
-    mkt_on = bool(bench_df["Close"].iloc[-1] > bench_df["Close"].rolling(200).mean().iloc[-1])
+    reg = strategy.market_regime(
+        bench_df["Close"],
+        target_vol=target_mkt_vol,
+        lo=vol_scale_min,
+        hi=vol_scale_max,
+        vol_ratio_max=vol_ratio_brake,
+        yellow_mult=yellow_light_mult,
+        vol_targeting=vol_targeting,
+    )
+    mkt_on = reg["mkt_on"]
+    vol_brake = reg["vol_brake"]
+    v_scale = reg["vol_scale"]
+    eff_scale = reg["regime_scale"]
     bench_ret60 = float(bench_df["Close"].iloc[-1] / bench_df["Close"].iloc[-61] - 1) if len(bench_df) >= 61 else 0.0
-    v_scale = strategy.market_vol_scale(
-        bench_df["Close"], target_vol=target_mkt_vol, lo=vol_scale_min, hi=vol_scale_max
-    ) if vol_targeting else 1.0
     asof = bench_df.index[-1]
     asof_str = str(asof.date())
 
+    cp_state = s.get("cash_park") or {}
+    cp_df = None
+    if (cfg["mode"] == "paper" or market == "US") and (cash_park_enabled or int(cp_state.get("qty") or 0) > 0):
+        load_cp_code = str(cp_state.get("code") or cp_code)
+        try:
+            cp_df = px.get(load_cp_code)
+            if cp_df is None:
+                cp_df = prices(load_cp_code)
+            if cp_df is not None:
+                px[load_cp_code] = cp_df
+        except Exception:
+            cp_df = None
+
     if cfg["mode"] == "paper" or market == "US":
-        fill_pending(s, px, log, buy_cost=buy_cost, sell_cost=sell_cost)
+        prev_eq = (
+            float(s["equity_log"][-1]["equity"])
+            if s.get("equity_log")
+            else float(
+                s["cash"]
+                + sum(p["qty"] * float(p.get("last_price") or (p["cost"] / max(p["qty"], 1))) for p in s["positions"].values())
+                + int(cp_state.get("qty") or 0) * float(cp_state.get("last_price") or 0.0)
+            )
+        )
+        cp_cfg = (
+            {
+                "enabled": True,
+                "code": cp_code,
+                "df": cp_df,
+                "prev_equity": prev_eq,
+                "buffer_pct": cp_buf,
+                "deadband_pct": cp_db,
+                "etf_cost": etf_cost,
+            }
+            if (cash_park_enabled and cp_df is not None and not cp_df.empty)
+            else None
+        )
+        fill_pending(s, px, log, buy_cost=buy_cost, sell_cost=sell_cost, cash_park_cfg=cp_cfg, asof=asof)
     else:
         from broker import get_broker
         reconcile(s, get_broker(cfg, read_only=True), asof, px, log, buy_cost=buy_cost, sell_cost=sell_cost)
@@ -411,7 +597,7 @@ def main():
                 new_orders.append({"side": "buy", "code": code, "name": name, "amount": unit_amt, "why": ev["why"]})
                 existing_pend.add((code, "buy"))
         else:
-            _, sig = strategy.check_entry(last, mkt_on=mkt_on, entry_mode=entry_mode)
+            _, sig = strategy.check_entry(last, mkt_on=mkt_on, entry_mode=entry_mode, vol_brake=vol_brake)
 
         close_disp = int(round(float(last["Close"]))) if market == "KR" else round(float(last["Close"]), 2)
         rows.append({
@@ -438,7 +624,27 @@ def main():
             "신호": sig,
         })
 
-    # 신규 매수: 빈 슬롯만큼, strategy.rank_by 기준 (v7: Clenow90 높은 순)
+    cp_state = s.get("cash_park") or {}
+    cp_qty = int(cp_state.get("qty") or 0)
+    cp_val = 0.0
+    if cp_qty > 0:
+        cp_close = None
+        if cp_df is not None and not cp_df.empty:
+            sub = cp_df[cp_df.index <= asof]
+            if not sub.empty:
+                cp_close = float(sub["Close"].iloc[-1])
+        if cp_close is None or not math.isfinite(cp_close) or cp_close <= 0:
+            cp_close = float(cp_state.get("last_price") or (cp_state.get("cost", 0.0) / cp_qty))
+        cp_state["last_price"] = cp_close
+        cp_val = cp_qty * cp_close
+        equity += cp_val
+
+    if cfg["mode"] != "paper" and market == "KR" and cash_park_enabled:
+        excess_rec = float(s["cash"]) - cp_buf * max(equity, 1.0)
+        if excess_rec > cp_db * max(equity, 1.0):
+            log.append(f"- 유휴현금 파킹 권고({cp_code}): 초과현금 약 {excess_rec:,.0f}{cur}")
+
+    # 신규 매수: 빈 슬롯만큼, strategy.rank_by 기준 (v8: Clenow90 높은 순)
     pend_new_buys = sum(
         1 for o in s["pending"] if o.get("status") is None and o["side"] == "buy" and o["code"] not in s["positions"]
     )
@@ -454,9 +660,9 @@ def main():
             continue
         if sizing == "inverse_vol":
             amt = strategy.inverse_vol_amount(
-                base_eq, r.get("VOL20"), target_risk=target_risk, max_pos_weight=max_pos_weight, vol_scale=v_scale
+                base_eq, r.get("VOL20"), target_risk=target_risk, max_pos_weight=max_pos_weight, vol_scale=eff_scale
             )
-            why_lbl = f"BUY invVol(x{v_scale:.2f})"
+            why_lbl = f"BUY invVol(x{eff_scale:.2f})"
         else:
             amt = (base_eq / max_pos) / units
             why_lbl = f"BUY 1/{units}"
@@ -481,8 +687,11 @@ def main():
         "date": asof_str,
         "equity": round(equity, 2 if market == "US" else 0),
         "cash": round(s["cash"], 2 if market == "US" else 0),
+        "cash_park": round(cp_val, 2 if market == "US" else 0),
         "n_pos": len(s["positions"]),
         "mkt_on": mkt_on,
+        "vol_brake": vol_brake,
+        "yellow_light": reg["yellow_light"],
     })
 
     # 손실 한도 (mock·live 는 KILL_SWITCH 자동 생성 -> 아침 주문 중지)
@@ -501,12 +710,13 @@ def main():
     tbl = pd.DataFrame(rows)
     hot = tbl[tbl["신호"].fillna("") != ""] if "신호" in tbl else tbl
     hist = pd.DataFrame(s["history"])
+    cp_disp = f" / 현금파킹({cp_state.get('code', cp_code)} {cp_qty}주 {cp_val:,.2f}{cur})" if cp_qty > 0 else ""
     md = [
         f"# 일일 신호 {asof:%Y-%m-%d} ({market})",
-        f"- 모드: **{cfg['mode']}** · 전략: **{entry_mode} / {exit_mode} / {rank_by} / {sizing}(x{v_scale:.2f})**"
+        f"- 모드: **{cfg['mode']}** · 전략(v8): **{entry_mode} / {exit_mode} / {rank_by} / {sizing}(x{eff_scale:.2f})**"
         + (f" / ⛔ KILL_SWITCH: {kill}" if kill else ""),
-        f"- 시장 필터({m_info['bench_name']} > 200일선): **{'ON' if mkt_on else 'OFF'}** · 변동성 타게팅 배율: **x{v_scale:.2f}**",
-        f"- 평가자산 {equity:,.2f}{cur} (초기 {s['capital0']:,.2f}, {100*(equity/s['capital0']-1):+.2f}%) / 현금 {s['cash']:,.2f}{cur} / 보유 {len(s['positions'])}종목",
+        f"- 시장 레짐: **{reg['label']}** ({m_info['bench_name']} > 200d={mkt_on}, VolRatio={reg['vol_ratio']:.2f}, VT=x{v_scale:.2f})",
+        f"- 평가자산 {equity:,.2f}{cur} (초기 {s['capital0']:,.2f}, {100*(equity/s['capital0']-1):+.2f}%) / 현금 {s['cash']:,.2f}{cur}{cp_disp} / 보유 {len(s['positions'])}종목",
         "",
         "## 오늘 체결(모의)",
         *(log or ["- 없음"]),
@@ -532,6 +742,10 @@ def main():
         "benchmark": m_info["bench_name"],
         "currency": cur,
         "mkt_on": mkt_on,
+        "regime_label": reg["label"],
+        "vol_ratio": round(reg["vol_ratio"], 3),
+        "vol_brake": vol_brake,
+        "yellow_light": reg["yellow_light"],
         "mode": cfg["mode"],
         "kill": kill,
         "max_positions": max_pos,
@@ -540,9 +754,12 @@ def main():
         "exit_mode": exit_mode,
         "rank_by": rank_by,
         "sizing": sizing,
-        "vol_scale": round(v_scale, 3),
+        "vol_scale": round(eff_scale, 3),
         "vol_targeting": vol_targeting,
         "hold_add_under20": hold_add,
+        "cash_park_code": cp_state.get("code", cp_code) if cash_park_enabled else None,
+        "cash_park_qty": cp_qty,
+        "cash_park_val": round(cp_val, 2 if market == "US" else 0),
         "expect": expect,
         "rows": rows,
         "new_orders": new_orders,

@@ -15,8 +15,8 @@ from pathlib import Path
 import pandas as pd
 
 HERE = Path(__file__).parent
-# 백테스트(2016~2026, 시총상위200 v7 StochRSI+IBS+VT+NoDist) 기대치 — 실전 성과 비교용
-EXPECT = {"승률%": 62.2, "거래당 평균%": 3.92, "PF": 1.72, "평균 보유일": 22.6}
+# 백테스트(2016~2026, 시총상위200 v8 StochRSI+IBS+VT+VolBrake+YellowLight+CashPark) 기대치 — 실전 성과 비교용
+EXPECT = {"승률%": 62.5, "거래당 평균%": 3.88, "PF": 1.72, "평균 보유일": 22.6}
 
 
 def _fmt(x, nd=0):
@@ -116,7 +116,21 @@ def build(state: dict, snap: dict, k200_close: pd.Series, out_dir: Path | str) -
     ret = 100 * (equity / cap0 - 1)
     bm = series[-1]["b"] - 100 if series else 0.0
     alpha = ret - bm
-    inv_pct = 100 * max(equity - float(state["cash"]), 0.0) / equity if equity > 0 else 0.0
+    cp_state = state.get("cash_park") or {}
+    cp_qty = int(cp_state.get("qty") or 0)
+    cp_val = float(snap.get("cash_park_val") or (cp_qty * float(cp_state.get("last_price") or 0.0)))
+    eq_stocks = max(equity - float(state["cash"]) - cp_val, 0.0)
+    inv_pct = 100 * eq_stocks / equity if equity > 0 else 0.0
+    cp_pct = 100 * cp_val / equity if equity > 0 else 0.0
+    inv_lbl = "투자비중 (주식 / 단기채)" if cp_val > 0 else "투자비중 (주식)"
+    inv_val = f"{inv_pct:.1f}% / {cp_pct:.1f}%" if cp_val > 0 else f"{inv_pct:.1f}%"
+    reg_lbl = snap.get("regime_label")
+    if reg_lbl == "BRAKE(VolRatio)":
+        mkt_txt = "BRAKE · 변동성 브레이크"
+    elif reg_lbl and str(reg_lbl).startswith("YELLOW"):
+        mkt_txt = f"ON · 매수 가능 ({html.escape(str(reg_lbl))})"
+    else:
+        mkt_txt = "ON · 매수 가능" if snap["mkt_on"] else "OFF · 신규매수 중지"
 
     h = pd.DataFrame(state.get("history", []))
     live = {}
@@ -269,16 +283,16 @@ th{{color:var(--ink2);font-weight:600;font-size:12px}}ul.hl,ul.log{{list-style:n
 #tip{{position:fixed;pointer-events:none;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:12px;display:none;box-shadow:0 2px 8px #0002}}
 </style></head><body><main>
 <h1>주식 자동매매 — 모의 장부</h1>
-<p class="sub">v7 ({html.escape(market)} · {html.escape(entry_mode)} · {html.escape(exit_mode)} · {html.escape(rank_by)} · {html.escape(sizing)}{html.escape(vol_txt)}) · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
+<p class="sub">v8 ({html.escape(market)} · {html.escape(entry_mode)} · {html.escape(exit_mode)} · {html.escape(rank_by)} · {html.escape(sizing)}{html.escape(vol_txt)}) · 모드 {html.escape(str(snap.get('mode', 'paper')))} · 기준일 {html.escape(str(snap['asof']))} · 마지막 실행 {html.escape(str(snap.get('last_run','')))}</p>
 <div class="tiles">
 <div class="tile"><div class="k">평가자산</div><div class="v">{_money(equity, cur)}</div></div>
 <div class="tile"><div class="k">누적 수익률</div><div class="v">{ret:+.2f}%</div></div>
 <div class="tile"><div class="k">같은 기간 {html.escape(bench_name)}</div><div class="v">{bm:+.2f}%</div></div>
 <div class="tile"><div class="k">시장 대비 초과수익</div><div class="v">{alpha:+.2f}%p</div></div>
 <div class="tile"><div class="k">현재 / 최대 낙폭</div><div class="v">{cur_dd:.1f}% / {mdd:.1f}%</div></div>
-<div class="tile"><div class="k">투자비중 (주식)</div><div class="v">{inv_pct:.1f}%</div></div>
+<div class="tile"><div class="k">{inv_lbl}</div><div class="v">{inv_val}</div></div>
 <div class="tile"><div class="k">보유 / 최대</div><div class="v">{len(state.get('positions', {}))} / {max_pos}</div></div>
-<div class="tile"><div class="k">시장 필터</div><div class="v">{'ON · 매수 가능' if snap['mkt_on'] else 'OFF · 신규매수 중지'}</div></div>
+<div class="tile"><div class="k">시장 필터</div><div class="v">{mkt_txt}</div></div>
 </div>
 <h2>점검</h2><div class="card"><ul class="hl">{health_html}</ul></div>
 <h2>계좌 vs {html.escape(bench_name)} (시작 = 100) · 낙폭(Drawdown)</h2>
